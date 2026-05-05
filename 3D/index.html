@@ -246,6 +246,17 @@ function projectForward(upWorld, hint) {
     return f;
 }
 
+// Pick any orthonormal frame with +Y = upWorld for an entity that has no
+// facing direction of its own. Stored on the entity once at spawn.
+function computeStaticMeshFrame(upWorld) {
+    const u = upWorld.clone().normalize();
+    const hint = (Math.abs(u.y) < 0.9) ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    const f = hint.clone();
+    f.addScaledVector(u, -u.dot(f)).normalize();
+    const r = new THREE.Vector3().crossVectors(f, u).normalize();
+    return { right: r, forward: f, up: u };
+}
+
 // ===== Grid shaders =====
 //
 // EXTRINSIC view (right panel): a sphere of radius R rendered with standard
@@ -959,19 +970,6 @@ addEntity(makePlatform(arcUp(-35, -45), 0, 25, 40, 12));
 addEntity(makePlatform(arcUp(70, -10), 0, 22, 22, 18));
 
 const _entityPos = new THREE.Vector3();
-
-// Pre-compute a stable mesh basis for static entities — any orthonormal
-// frame with +Y = upWorld works, since the entity has no facing direction
-// of its own. Stored on the entity once at spawn.
-const _frameTmpHint = new THREE.Vector3(1, 0, 0);
-function computeStaticMeshFrame(upWorld) {
-    const u = upWorld.clone().normalize();
-    let hint = (Math.abs(u.y) < 0.9) ? _frameTmpHint : new THREE.Vector3(0, 1, 0);
-    const f = hint.clone();
-    f.addScaledVector(u, -u.dot(f)).normalize();
-    const r = new THREE.Vector3().crossVectors(f, u).normalize();
-    return { right: r, forward: f, up: u };
-}
 
 function updateEntities(dt) {
     // Walkers walk along their own great circles. Walking forward = rotate
