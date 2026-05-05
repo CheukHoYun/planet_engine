@@ -246,23 +246,6 @@ function projectForward(upWorld, hint) {
     return f;
 }
 
-// Place an entity's extrinsic mesh at (R+h)·upWorld with +Y aligned to upWorld.
-function placeExtrinsicMesh(mesh, upWorld, h) {
-    mesh.position.copy(upWorld).multiplyScalar(R + h);
-    mesh.quaternion.setFromUnitVectors(Y_AXIS, upWorld);
-}
-
-// Walker placement uses the full SO(3) frame so the cube faces its motion direction.
-const _exMat = new THREE.Matrix4();
-function placeExtrinsicMeshOriented(mesh, frame, h) {
-    const r = frame.right();
-    const u = frame.up();
-    const f = frame.forward();
-    _exMat.makeBasis(r, u, f);
-    mesh.quaternion.setFromRotationMatrix(_exMat);
-    mesh.position.copy(u).multiplyScalar(R + h);
-}
-
 // ===== Grid shaders =====
 //
 // EXTRINSIC view (right panel): a sphere of radius R rendered with standard
@@ -280,7 +263,7 @@ function placeExtrinsicMeshOriented(mesh, frame, h) {
 // The horizon is flat because the geometry is flat. The curvature is
 // visible only as grid-line convergence near the poles.
 
-// --- Extrinsic ---
+// --- Extrinsic sphere (the embedded surface itself; standard rendering) ---
 const EXTRINSIC_VERTEX_SHADER = `
     varying vec3 vWorldPos;
     void main() {
@@ -289,6 +272,90 @@ const EXTRINSIC_VERTEX_SHADER = `
         gl_Position = projectionMatrix * viewMatrix * wp;
     }
 `;
+
+// --- Extrinsic entity embedding ---
+//
+// The Euclidean embedding of S²×ℝ at intrinsic position (θ, φ, h) is
+// (R + h) · unit_vector(θ, φ). For an entity with vertices in its own
+// local frame {x_local along uMeshX, y_local = height-above-ground,
+// z_local along uMeshZ}, each vertex's embedded world position is
+//
+//     unit_dir = exp(uObjectUp, x_local·uMeshX + z_local·uMeshZ, |arc|/R)
+//     world = (R + uObjectH + y_local) · unit_dir
+//
+// This is the per-vertex truth. Earlier the code "fixed" the trapezoid
+// effect for the striped pole by scaling each band uniformly — that gave
+// the tower its sudden jumps. The smiley wasn't stretched at all. With
+// this shader, both fall out for free: each vertex of the smiley is at
+// its own h, and each level of the tower scales continuously.
+const EXTRINSIC_EMBED_VERTEX_SHADER = `
+    uniform vec3 uObjectUp;
+    uniform vec3 uMeshX;
+    uniform vec3 uMeshZ;
+    uniform float uObjectH;
+    uniform float uR;
+    void main() {
+        vec4 lp = modelMatrix * vec4(position, 1.0);
+        float xLocal = lp.x;
+        float yLocal = lp.y;
+        float zLocal = lp.z;
+        float hVertex = uObjectH + yLocal;
+        float d = sqrt(xLocal * xLocal + zLocal * zLocal);
+        vec3 unitDir;
+        if (d < 1e-3) {
+            unitDir = uObjectUp;
+        } else {
+            vec3 tangentVec = xLocal * uMeshX + zLocal * uMeshZ;
+            vec3 tangentDir = tangentVec / d;
+            float angle = d / uR;
+            unitDir = uObjectUp * cos(angle) + tangentDir * sin(angle);
+        }
+        vec3 worldPos = (uR + hVertex) * unitDir;
+        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+    }
+`;
+
+const EXTRINSIC_EMBED_FRAGMENT_SHADER = `
+    precision highp float;
+    uniform vec3 uColor;
+    void main() {
+        gl_FragColor = vec4(uColor, 1.0);
+    }
+`;
+
+// Each entity has a single uniforms object shared by all of its child
+// materials. Mutating its values updates all materials at once.
+function createEntityUniforms() {
+    return {
+        uObjectUp:  { value: new THREE.Vector3(0, 1, 0) },
+        uMeshX:     { value: new THREE.Vector3(1, 0, 0) },
+        uMeshZ:     { value: new THREE.Vector3(0, 0, 1) },
+        uObjectH:   { value: 0 }
+    };
+}
+
+// Global R uniform — shared by every embedding material AND the intrinsic
+// ground material. Mutating its `value` rebinds R everywhere.
+const GLOBAL_R_UNIFORM = { value: R };
+
+function embeddingMaterial(color, entityUniforms) {
+    return new THREE.ShaderMaterial({
+        vertexShader: EXTRINSIC_EMBED_VERTEX_SHADER,
+        fragmentShader: EXTRINSIC_EMBED_FRAGMENT_SHADER,
+        uniforms: {
+            uObjectUp:  entityUniforms.uObjectUp,
+            uMeshX:     entityUniforms.uMeshX,
+            uMeshZ:     entityUniforms.uMeshZ,
+            uObjectH:   entityUniforms.uObjectH,
+            uR:         GLOBAL_R_UNIFORM,
+            uColor:     { value: new THREE.Color(color) }
+        }
+    });
+}
+
+function basicMaterial(color) {
+    return new THREE.MeshBasicMaterial({ color });
+}
 
 const EXTRINSIC_FRAGMENT_SHADER = `
     precision highp float;
@@ -378,7 +445,7 @@ function intrinsicGridMaterial() {
             uPlayerRight:   { value: new THREE.Vector3(1, 0, 0) },
             uPlayerForward: { value: new THREE.Vector3(0, 1, 0) },
             uPlayerUp:      { value: new THREE.Vector3(0, 0, 1) },
-            uR:             { value: R }
+            uR:             GLOBAL_R_UNIFORM
         }
     });
 }
@@ -430,6 +497,44 @@ function buildGroundPatch() {
     return { mesh, material };
 }
 
+// ===== Player mesh — shared between intrinsic and extrinsic views.
+// Pink cube with white eye-rectangles, dark pupils, dark-pink belt at h*0.6.
+// Group origin sits at the player's feet; eyes face local -Z (the walking
+// direction). 22×30×22 to match the 2D prototype.
+const PLAYER_W = 22;
+const PLAYER_H = 30;
+const PLAYER_BELT_COLOR = 0x7a2848;
+
+function makePlayerMesh(materialFor) {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(
+        new THREE.BoxGeometry(PLAYER_W, PLAYER_H, PLAYER_W),
+        materialFor(PLAYER_COLOR)
+    );
+    body.position.y = PLAYER_H / 2;
+    g.add(body);
+    const beltH = 1.5;
+    const belt = new THREE.Mesh(
+        new THREE.BoxGeometry(PLAYER_W + 0.2, beltH, PLAYER_W + 0.2),
+        materialFor(PLAYER_BELT_COLOR)
+    );
+    belt.position.y = PLAYER_H * 0.6;
+    g.add(belt);
+    const eyeGeo = new THREE.BoxGeometry(4, 5, 0.4);
+    const pupilGeo = new THREE.BoxGeometry(2, 3, 0.2);
+    const eyeY = PLAYER_H * 0.75;
+    const eyeZ = -PLAYER_W / 2 - 0.1;
+    for (const sx of [-1, 1]) {
+        const eye = new THREE.Mesh(eyeGeo, materialFor(0xffffff));
+        eye.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ);
+        g.add(eye);
+        const pupil = new THREE.Mesh(pupilGeo, materialFor(0x000000));
+        pupil.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ - 0.3);
+        g.add(pupil);
+    }
+    return g;
+}
+
 // ===== Entity factories =====
 //
 // Each factory returns
@@ -457,24 +562,22 @@ function makeWalker(color, walkSpeed, upWorld, forwardHint) {
     const W = 20;
     const H = 24;
     const geo = new THREE.BoxGeometry(W, H, W);
-    const mat = new THREE.MeshBasicMaterial({ color });
-
-    const make = () => {
+    const make = (mat) => {
         const g = new THREE.Group();
         const body = new THREE.Mesh(geo, mat);
         body.position.y = H / 2;
         g.add(body);
         return g;
     };
-
     const frame = new Frame();
     setFrameFromUpForward(frame, upWorld, forwardHint);
-
+    const entityUniforms = createEntityUniforms();
     return {
         kind: 'walker',
         frame,
-        intrinsicMesh: make(),
-        extrinsicMesh: make(),
+        intrinsicMesh: make(basicMaterial(color)),
+        extrinsicMesh: make(embeddingMaterial(color, entityUniforms)),
+        entityUniforms,
         h: 0,
         speed: walkSpeed,
         size: W,
@@ -492,36 +595,32 @@ function makeWalker(color, walkSpeed, upWorld, forwardHint) {
 function makeTree(upWorld) {
     const TRUNK_W = 14;
     const TRUNK_H = 40;
-
     const trunkGeo = new THREE.BoxGeometry(TRUNK_W, TRUNK_H, TRUNK_W);
-    const trunkMat = new THREE.MeshBasicMaterial({ color: COLOR_TRUNK });
     const canopyMainGeo = new THREE.SphereGeometry(28, 24, 16);
-    const canopyMainMat = new THREE.MeshBasicMaterial({ color: COLOR_CANOPY });
     const canopy2Geo = new THREE.SphereGeometry(18, 18, 14);
     const canopy3Geo = new THREE.SphereGeometry(16, 18, 14);
-    const canopySecMat = new THREE.MeshBasicMaterial({ color: COLOR_CANOPY_LIGHT });
-
-    const make = () => {
+    const make = (matFor) => {
         const g = new THREE.Group();
-        const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+        const trunk = new THREE.Mesh(trunkGeo, matFor(COLOR_TRUNK));
         trunk.position.y = TRUNK_H / 2;
         g.add(trunk);
-        const canopy = new THREE.Mesh(canopyMainGeo, canopyMainMat);
+        const canopy = new THREE.Mesh(canopyMainGeo, matFor(COLOR_CANOPY));
         canopy.position.y = 80;
         g.add(canopy);
-        const canopy2 = new THREE.Mesh(canopy2Geo, canopySecMat);
+        const canopy2 = new THREE.Mesh(canopy2Geo, matFor(COLOR_CANOPY_LIGHT));
         canopy2.position.set(-10, 88, 0);
         g.add(canopy2);
-        const canopy3 = new THREE.Mesh(canopy3Geo, canopySecMat);
+        const canopy3 = new THREE.Mesh(canopy3Geo, matFor(COLOR_CANOPY_LIGHT));
         canopy3.position.set(12, 84, 0);
         g.add(canopy3);
         return g;
     };
-
+    const entityUniforms = createEntityUniforms();
     return {
         kind: 'tree',
-        intrinsicMesh: make(),
-        extrinsicMesh: make(),
+        intrinsicMesh: make(basicMaterial),
+        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        entityUniforms,
         upWorld,
         h: 0
     };
@@ -530,35 +629,29 @@ function makeTree(upWorld) {
 function makeSmiley(upWorld, h) {
     const RR = 25;
     const sphereGeo = new THREE.SphereGeometry(RR, 32, 24);
-    const sphereMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY });
     const eyeGeo = new THREE.SphereGeometry(RR * 0.13, 12, 8);
-    const eyeMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY_DARK });
     const mouthGeo = new THREE.TorusGeometry(RR * 0.45, RR * 0.06, 8, 24, Math.PI);
-    const mouthMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY_DARK });
-
-    const make = () => {
+    const make = (matFor) => {
         const g = new THREE.Group();
-        g.add(new THREE.Mesh(sphereGeo, sphereMat));
-        // Eyes and mouth on the local -Z face so they face the player on spawn.
+        g.add(new THREE.Mesh(sphereGeo, matFor(COLOR_SMILEY)));
         const z = -RR * 0.92;
         for (const sx of [-1, 1]) {
-            const eye = new THREE.Mesh(eyeGeo, eyeMat);
+            const eye = new THREE.Mesh(eyeGeo, matFor(COLOR_SMILEY_DARK));
             eye.position.set(sx * RR * 0.32, RR * 0.20, z);
             g.add(eye);
         }
-        // TorusGeometry with arc=π is the upper half-ring (looks like a frown).
-        // Rotating by π around Z flips it to a smile (∪).
-        const mouth = new THREE.Mesh(mouthGeo, mouthMat);
+        const mouth = new THREE.Mesh(mouthGeo, matFor(COLOR_SMILEY_DARK));
         mouth.position.set(0, -RR * 0.10, z * 0.97);
         mouth.rotation.z = Math.PI;
         g.add(mouth);
         return g;
     };
-
+    const entityUniforms = createEntityUniforms();
     return {
         kind: 'smiley',
-        intrinsicMesh: make(),
-        extrinsicMesh: make(),
+        intrinsicMesh: make(basicMaterial),
+        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        entityUniforms,
         upWorld,
         h
     };
@@ -570,50 +663,25 @@ function makeStripedPole(upWorld) {
     const N_BANDS = POLE_COLORS.length;
     const BAND_H = TOTAL_H / N_BANDS;
     const bandGeo = new THREE.BoxGeometry(POLE_W, BAND_H, POLE_W);
-
-    const intrinsicMesh = new THREE.Group();
-    for (let i = 0; i < N_BANDS; i++) {
-        const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
-        const band = new THREE.Mesh(bandGeo, mat);
-        band.position.y = i * BAND_H + BAND_H / 2;
-        intrinsicMesh.add(band);
-    }
-
-    // Extrinsic version: each band's width scaled by (R + h_band) / R — the
-    // visible "trapezoid" effect of S²×ℝ's product metric. Same arc length is
-    // a wider Euclidean width when embedded at greater radius. Bands are
-    // exposed so we can rescale them live when R changes.
-    const extrinsicMesh = new THREE.Group();
-    const extrinsicBands = [];
-    for (let i = 0; i < N_BANDS; i++) {
-        const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
-        const band = new THREE.Mesh(bandGeo, mat);
-        band.position.y = i * BAND_H + BAND_H / 2;
-        extrinsicMesh.add(band);
-        extrinsicBands.push(band);
-    }
-
-    const pole = {
+    const make = (matFor) => {
+        const g = new THREE.Group();
+        for (let i = 0; i < N_BANDS; i++) {
+            const band = new THREE.Mesh(bandGeo, matFor(POLE_COLORS[i]));
+            band.position.y = i * BAND_H + BAND_H / 2;
+            g.add(band);
+        }
+        return g;
+    };
+    const entityUniforms = createEntityUniforms();
+    return {
         kind: 'pole',
-        intrinsicMesh,
-        extrinsicMesh,
-        extrinsicBands,
-        bandHeight: BAND_H,
+        intrinsicMesh: make(basicMaterial),
+        // The embedding shader handles per-vertex scaling; no per-band hack.
+        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        entityUniforms,
         upWorld,
         h: 0
     };
-    rescalePoleBands(pole);
-    return pole;
-}
-
-function rescalePoleBands(pole) {
-    for (let i = 0; i < pole.extrinsicBands.length; i++) {
-        const band = pole.extrinsicBands[i];
-        const cy = i * pole.bandHeight + pole.bandHeight / 2;
-        const widen = (R + cy) / R;
-        band.scale.x = widen;
-        band.scale.z = widen;
-    }
 }
 
 // Marker — a small colored cylinder, dropped by the player. The marker's
@@ -624,18 +692,19 @@ function makeMarker(upWorld, color) {
     const RAD = 2.5;
     const HT = 12;
     const geo = new THREE.CylinderGeometry(RAD, RAD, HT, 14);
-    const mat = new THREE.MeshBasicMaterial({ color });
-    const make = () => {
+    const make = (mat) => {
         const g = new THREE.Group();
         const cyl = new THREE.Mesh(geo, mat);
         cyl.position.y = HT / 2;
         g.add(cyl);
         return g;
     };
+    const entityUniforms = createEntityUniforms();
     return {
         kind: 'marker',
-        intrinsicMesh: make(),
-        extrinsicMesh: make(),
+        intrinsicMesh: make(basicMaterial(color)),
+        extrinsicMesh: make(embeddingMaterial(color, entityUniforms)),
+        entityUniforms,
         upWorld,
         h: 0
     };
@@ -646,24 +715,22 @@ function makePlatform(upWorld, h, width, depth, height) {
     const topH = height - baseH;
     const baseGeo = new THREE.BoxGeometry(width, baseH, depth);
     const topGeo = new THREE.BoxGeometry(width, topH, depth);
-    const baseMat = new THREE.MeshBasicMaterial({ color: COLOR_PLATFORM_BASE });
-    const topMat = new THREE.MeshBasicMaterial({ color: COLOR_PLATFORM_TOP });
-
-    const make = () => {
+    const make = (matFor) => {
         const g = new THREE.Group();
-        const base = new THREE.Mesh(baseGeo, baseMat);
+        const base = new THREE.Mesh(baseGeo, matFor(COLOR_PLATFORM_BASE));
         base.position.y = baseH / 2;
         g.add(base);
-        const top = new THREE.Mesh(topGeo, topMat);
+        const top = new THREE.Mesh(topGeo, matFor(COLOR_PLATFORM_TOP));
         top.position.y = baseH + topH / 2;
         g.add(top);
         return g;
     };
-
+    const entityUniforms = createEntityUniforms();
     return {
         kind: 'platform',
-        intrinsicMesh: make(),
-        extrinsicMesh: make(),
+        intrinsicMesh: make(basicMaterial),
+        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        entityUniforms,
         upWorld,
         h
     };
@@ -677,43 +744,11 @@ function makeExtrinsicView(canvas) {
     const sphere = buildExtrinsicSphere(R);
     scene.add(sphere);
 
-    // Player marker — a pink cube with white eyes, dark pupils, and a thin
-    // dark-pink belt — matching the 2D player exactly. ~22×30×22 units.
-    const PLAYER_W = 22;
-    const PLAYER_H = 30;
-    const PLAYER_BELT_COLOR = 0x7a2848;
-    const playerMarker = new THREE.Group();
-    {
-        const body = new THREE.Mesh(
-            new THREE.BoxGeometry(PLAYER_W, PLAYER_H, PLAYER_W),
-            new THREE.MeshBasicMaterial({ color: PLAYER_COLOR })
-        );
-        body.position.y = PLAYER_H / 2;
-        playerMarker.add(body);
-        // Belt: thin dark-pink horizontal stripe at h*0.6 (matching 2D).
-        const beltH = 1.5;
-        const belt = new THREE.Mesh(
-            new THREE.BoxGeometry(PLAYER_W + 0.2, beltH, PLAYER_W + 0.2),
-            new THREE.MeshBasicMaterial({ color: PLAYER_BELT_COLOR })
-        );
-        belt.position.y = PLAYER_H * 0.6;
-        playerMarker.add(belt);
-        // Eyes: white rectangles 4×5, on the -Z (front) face.
-        const eyeGeo = new THREE.BoxGeometry(4, 5, 0.4);
-        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const pupilGeo = new THREE.BoxGeometry(2, 3, 0.2);
-        const pupilMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-        const eyeY = PLAYER_H * 0.75;
-        const eyeZ = -PLAYER_W / 2 - 0.1;
-        for (const sx of [-1, 1]) {
-            const eye = new THREE.Mesh(eyeGeo, eyeMat);
-            eye.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ);
-            playerMarker.add(eye);
-            const pupil = new THREE.Mesh(pupilGeo, pupilMat);
-            pupil.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ - 0.3);
-            playerMarker.add(pupil);
-        }
-    }
+    // Player marker — built via the shared makePlayerMesh helper using the
+    // extrinsic embedding material so the player itself respects the
+    // per-vertex (R+h)/R stretching like every other entity.
+    const playerUniforms = createEntityUniforms();
+    const playerMarker = makePlayerMesh((c) => embeddingMaterial(c, playerUniforms));
     scene.add(playerMarker);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
@@ -789,30 +824,26 @@ function makeExtrinsicView(canvas) {
         camera.updateProjectionMatrix();
     }
 
-    const _markerMat = new THREE.Matrix4();
-
     function render(world) {
         if (world) {
-            // Place the player marker as a proper basis-oriented cube on the
-            // sphere: +Y aligned to up_world, -Z (front of cube) aligned to
-            // walking forward direction.
-            const r = world.frame.right();
+            // Player marker: push frame to the embedding-shader uniforms.
+            // uMeshX = world.right, uObjectUp = world.up, uMeshZ = -world.forward
+            // (mesh local +Z = back of player, since eyes face mesh -Z).
             const u = world.frame.up();
-            const f = world.frame.forward();
-            _markerMat.makeBasis(r, u, f);
-            playerMarker.quaternion.setFromRotationMatrix(_markerMat);
-            playerMarker.position.copy(u).multiplyScalar(R);
+            playerUniforms.uObjectUp.value.copy(u);
+            playerUniforms.uMeshX.value.copy(world.frame.right());
+            playerUniforms.uMeshZ.value.copy(world.frame.forward()).multiplyScalar(-1);
+            playerUniforms.uObjectH.value = 0;
         }
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, sphere, playerMarker, orbit, applyOrbit, resize, render };
+    return { scene, camera, renderer, sphere, playerMarker, playerUniforms, orbit, applyOrbit, resize, render };
 }
 
 // ===== Intrinsic view: standard Three.js camera looking at a flat plane.
-// The world is genuinely flat from the inhabitant's POV; no spherical
-// geometry exists in this scene. Yaw is carried by the SO(3) frame uniforms
-// pushed to the ground shader; pitch is the only camera rotation.
+// Third-person camera orbits the player vertically with pitch; yaw rotates
+// the player frame so the world spins around the camera-and-player together.
 function makeIntrinsicView(canvas) {
     const scene = new THREE.Scene();
     // Sky comes from a CSS gradient on the canvas; let WebGL clear transparently.
@@ -820,16 +851,37 @@ function makeIntrinsicView(canvas) {
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
 
+    // The player lives at the origin of the tangent frame (the player IS the
+    // reference). Standard Three.js material — this is just a flat scene.
+    const playerMesh = makePlayerMesh(basicMaterial);
+    scene.add(playerMesh);
+
     const camera = new THREE.PerspectiveCamera(70, 1, 0.1, GRID_HALF_ARC * 4);
-    camera.position.set(0, EYE_HEIGHT, 0);
     camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(0x000000, 0);
 
+    // Third-person orbit: camera stays directly behind the player (in tangent
+    // space, that's +Z), at a fixed orbit radius around the player's center.
+    // Mouse-Y (pitch) elevates/lowers the camera.
+    const PLAYER_CENTER_Y = PLAYER_H * 0.5;
+    const ORBIT_RADIUS = 80;
+    const ORBIT_BASE_ANGLE = 0.20;  // ~11° default elevation, looking slightly down
+
+    const _lookTarget = new THREE.Vector3();
+
     function placeCamera(world) {
-        camera.rotation.set(-world.pitch, 0, 0);
+        const angle = ORBIT_BASE_ANGLE + world.pitch;
+        camera.position.set(
+            0,
+            PLAYER_CENTER_Y + ORBIT_RADIUS * Math.sin(angle),
+            ORBIT_RADIUS * Math.cos(angle)
+        );
+        camera.up.set(0, 1, 0);
+        _lookTarget.set(0, PLAYER_CENTER_Y, 0);
+        camera.lookAt(_lookTarget);
     }
 
     function updateGroundUniforms(world) {
@@ -837,7 +889,6 @@ function makeIntrinsicView(canvas) {
         u.uPlayerRight.value.copy(world.frame.right());
         u.uPlayerForward.value.copy(world.frame.forward());
         u.uPlayerUp.value.copy(world.frame.up());
-        u.uR.value = R;
     }
 
     function resize() {
@@ -855,7 +906,7 @@ function makeIntrinsicView(canvas) {
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, ground, resize, render };
+    return { scene, camera, renderer, ground, playerMesh, resize, render };
 }
 
 // ===== Bootstrap =====
@@ -878,7 +929,11 @@ const walkers = [];
 
 function addEntity(e) {
     entities.push(e);
-    if (e.kind === 'walker') walkers.push(e);
+    if (e.kind === 'walker') {
+        walkers.push(e);
+    } else {
+        e.staticFrame = computeStaticMeshFrame(e.upWorld);
+    }
     intrinsicView.scene.add(e.intrinsicMesh);
     extrinsicView.scene.add(e.extrinsicMesh);
 }
@@ -905,6 +960,19 @@ addEntity(makePlatform(arcUp(70, -10), 0, 22, 22, 18));
 
 const _entityPos = new THREE.Vector3();
 
+// Pre-compute a stable mesh basis for static entities — any orthonormal
+// frame with +Y = upWorld works, since the entity has no facing direction
+// of its own. Stored on the entity once at spawn.
+const _frameTmpHint = new THREE.Vector3(1, 0, 0);
+function computeStaticMeshFrame(upWorld) {
+    const u = upWorld.clone().normalize();
+    let hint = (Math.abs(u.y) < 0.9) ? _frameTmpHint : new THREE.Vector3(0, 1, 0);
+    const f = hint.clone();
+    f.addScaledVector(u, -u.dot(f)).normalize();
+    const r = new THREE.Vector3().crossVectors(f, u).normalize();
+    return { right: r, forward: f, up: u };
+}
+
 function updateEntities(dt) {
     // Walkers walk along their own great circles. Walking forward = rotate
     // their frame around right by -v·dt/R, same as the player.
@@ -914,18 +982,40 @@ function updateEntities(dt) {
             w.frame.reorthogonalize();
         }
     }
+
     // Place each entity in both scenes.
     for (const e of entities) {
-        const upW = (e.kind === 'walker') ? e.frame.up() : e.upWorld;
-        // Intrinsic: tangent-space projection. Local +Y of mesh stays vertical.
+        const isWalker = (e.kind === 'walker');
+        const upW = isWalker ? e.frame.up() : e.upWorld;
+
+        // Intrinsic: project to player-local tangent.
         projectToTangent(upW, e.h, world.frame, _entityPos);
         e.intrinsicMesh.position.copy(_entityPos);
-        // Extrinsic: absolute placement on the embedded sphere.
-        if (e.kind === 'walker') {
-            placeExtrinsicMeshOriented(e.extrinsicMesh, e.frame, e.h);
-        } else {
-            placeExtrinsicMesh(e.extrinsicMesh, e.upWorld, e.h);
+
+        // Smiley: billboard toward the player horizontally so the eyes
+        // always face you.
+        if (e.kind === 'smiley') {
+            const x = e.intrinsicMesh.position.x;
+            const z = e.intrinsicMesh.position.z;
+            if (x !== 0 || z !== 0) {
+                e.intrinsicMesh.rotation.y = Math.atan2(x, z);
+            }
         }
+
+        // Extrinsic: push uniforms; the embedding shader does the placement.
+        const u = e.entityUniforms;
+        if (isWalker) {
+            u.uObjectUp.value.copy(e.frame.up());
+            u.uMeshX.value.copy(e.frame.right());
+            u.uMeshZ.value.copy(e.frame.forward()).multiplyScalar(-1);
+        } else {
+            // Static entities: use the basis computed at spawn.
+            const f = e.staticFrame;
+            u.uObjectUp.value.copy(f.up);
+            u.uMeshX.value.copy(f.right);
+            u.uMeshZ.value.copy(f.forward);
+        }
+        u.uObjectH.value = e.h;
     }
 }
 
@@ -935,7 +1025,10 @@ let pointerLocked = false;
 let yawAccum = 0;
 let pitchAccum = 0;
 const MOUSE_SENSITIVITY = 0.002;
-const PITCH_LIMIT = 1.483;  // ~85°
+// Third-person pitch range: total camera elevation = ORBIT_BASE_ANGLE (0.20) +
+// pitch, clamped so it stays in [~3°, ~80°] above the ground at the player.
+const PITCH_MIN = -0.15;
+const PITCH_MAX = 1.20;
 
 intrinsicCanvas.addEventListener('click', () => {
     if (!pointerLocked) intrinsicCanvas.requestPointerLock();
@@ -975,16 +1068,9 @@ rSlider.addEventListener('input', () => {
 function setR(newR) {
     const oldR = R;
     R = newR;
+    GLOBAL_R_UNIFORM.value = R;  // every embedding material + ground shader sees this
     rValueEl.textContent = String(Math.round(R));
-    // Intrinsic shader: re-bind the world radius uniform.
-    intrinsicView.ground.material.uniforms.uR.value = R;
-    // Extrinsic sphere: rescale the existing geometry instead of rebuilding.
     extrinsicView.sphere.scale.setScalar(R / R_INITIAL);
-    // Striped pole: recompute per-band scales.
-    for (const e of entities) {
-        if (e.kind === 'pole') rescalePoleBands(e);
-    }
-    // Orbit camera: keep the same fraction of R, then clamp to new bounds.
     const ratio = newR / oldR;
     extrinsicView.orbit.radius = Math.max(R * 1.1, Math.min(R * 20, extrinsicView.orbit.radius * ratio));
     extrinsicView.camera.far = R * 50;
@@ -1033,7 +1119,7 @@ function integrate(dt) {
     // matching the camera setup `rotation.x = -pitch`. Mouse-down (positive
     // movementY) increases pitch.
     if (pitchAccum !== 0) {
-        world.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, world.pitch + pitchAccum));
+        world.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, world.pitch + pitchAccum));
         pitchAccum = 0;
     }
     // Walk: rotate around right. -angle moves player toward +forward (premultiply convention)
