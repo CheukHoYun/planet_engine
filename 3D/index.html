@@ -134,7 +134,12 @@ const R_INITIAL = 500.0;             // the radius the extrinsic sphere geometry
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 25.0;            // m/s
 const GRID_N = 121;                  // ground patch resolution
-const GRID_HALF_ARC = 150.0;         // half-extent of the tangent-plane ground patch, in meters
+// Half-extent of the flat tangent-plane ground patch, in arc-meters. Large
+// enough that the patch boundary lands very close to the true horizon line
+// at any reasonable camera height. Also covers more than 2π·R wrap distance
+// at every R the slider allows, so universal-cover entity copies sit on real
+// ground rather than sky.
+const GRID_HALF_ARC = 3000.0;
 const PLAYER_COLOR = 0xff5e8a;
 
 // ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
@@ -246,13 +251,21 @@ function projectForward(upWorld, hint) {
     return f;
 }
 
-// Pick any orthonormal frame with +Y = upWorld for an entity that has no
-// facing direction of its own. Stored on the entity once at spawn.
+// Choose an orthonormal world frame for a static entity. The "forward"
+// direction is the way the entity's mesh -Z (its "front" — where eyes face)
+// points in the world. We orient it back toward the spawn so the player
+// sees the front face on first walk-up rather than always seeing the back.
+const _SPAWN_DIR = new THREE.Vector3(0, 0, 1);
 function computeStaticMeshFrame(upWorld) {
     const u = upWorld.clone().normalize();
-    const hint = (Math.abs(u.y) < 0.9) ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-    const f = hint.clone();
-    f.addScaledVector(u, -u.dot(f)).normalize();
+    const f = _SPAWN_DIR.clone();
+    f.addScaledVector(u, -u.dot(f));
+    if (f.lengthSq() < 1e-6) {
+        // Entity is at the spawn (or antipode) — pick any tangent direction.
+        f.set(0, 1, 0);
+        f.addScaledVector(u, -u.dot(f));
+    }
+    f.normalize();
     const r = new THREE.Vector3().crossVectors(f, u).normalize();
     return { right: r, forward: f, up: u };
 }
@@ -971,6 +984,15 @@ addEntity(makePlatform(arcUp(70, -10), 0, 22, 22, 18));
 
 const _entityPos = new THREE.Vector3();
 
+// Scratch vectors for entity orientation projection.
+const _eR = new THREE.Vector3();
+const _eU = new THREE.Vector3();
+const _eF = new THREE.Vector3();
+const _entXt = new THREE.Vector3();
+const _entYt = new THREE.Vector3();
+const _entZt = new THREE.Vector3();
+const _entMat = new THREE.Matrix4();
+
 function updateEntities(dt) {
     // Walkers walk along their own great circles. Walking forward = rotate
     // their frame around right by -v·dt/R, same as the player.
@@ -981,38 +1003,50 @@ function updateEntities(dt) {
         }
     }
 
-    // Place each entity in both scenes.
+    const pR = world.frame.right();
+    const pU = world.frame.up();
+    const pF = world.frame.forward();
+
     for (const e of entities) {
         const isWalker = (e.kind === 'walker');
-        const upW = isWalker ? e.frame.up() : e.upWorld;
 
-        // Intrinsic: project to player-local tangent.
-        projectToTangent(upW, e.h, world.frame, _entityPos);
+        // Capture entity world axes (frame.up() etc. mutate caches).
+        if (isWalker) {
+            _eR.copy(e.frame.right());
+            _eU.copy(e.frame.up());
+            _eF.copy(e.frame.forward());
+        } else {
+            _eR.copy(e.staticFrame.right);
+            _eU.copy(e.staticFrame.up);
+            _eF.copy(e.staticFrame.forward);
+        }
+
+        // Intrinsic: project the entity's surface point to the player's
+        // tangent frame.
+        projectToTangent(_eU, e.h, world.frame, _entityPos);
         e.intrinsicMesh.position.copy(_entityPos);
 
-        // Smiley: billboard toward the player horizontally so the eyes
-        // always face you.
-        if (e.kind === 'smiley') {
-            const x = e.intrinsicMesh.position.x;
-            const z = e.intrinsicMesh.position.z;
-            if (x !== 0 || z !== 0) {
-                e.intrinsicMesh.rotation.y = Math.atan2(x, z);
-            }
-        }
+        // Apparent rotation in tangent space: express the entity's world
+        // axes in the player's tangent basis. As the player walks around the
+        // entity, the entity's mesh rotates accordingly so different sides
+        // come into view.
+        //   mesh +X → entity.right (in tangent)
+        //   mesh +Y → entity.up    (in tangent)
+        //   mesh +Z → -entity.forward (in tangent) — mesh +Z is the back face
+        // Tangent convention: +X = pR, +Y = pU, +Z = -pF (Three.js).
+        _entXt.set(_eR.dot(pR), _eR.dot(pU), -_eR.dot(pF));
+        _entYt.set(_eU.dot(pR), _eU.dot(pU), -_eU.dot(pF));
+        _entZt.set(-_eF.dot(pR), -_eF.dot(pU), _eF.dot(pF));
+        _entMat.makeBasis(_entXt, _entYt, _entZt);
+        e.intrinsicMesh.quaternion.setFromRotationMatrix(_entMat);
 
         // Extrinsic: push uniforms; the embedding shader does the placement.
+        // Convention: uMeshZ is the world direction that mesh +Z (the BACK
+        // of the entity) maps to, so uMeshZ = -entity.forward.
         const u = e.entityUniforms;
-        if (isWalker) {
-            u.uObjectUp.value.copy(e.frame.up());
-            u.uMeshX.value.copy(e.frame.right());
-            u.uMeshZ.value.copy(e.frame.forward()).multiplyScalar(-1);
-        } else {
-            // Static entities: use the basis computed at spawn.
-            const f = e.staticFrame;
-            u.uObjectUp.value.copy(f.up);
-            u.uMeshX.value.copy(f.right);
-            u.uMeshZ.value.copy(f.forward);
-        }
+        u.uObjectUp.value.copy(_eU);
+        u.uMeshX.value.copy(_eR);
+        u.uMeshZ.value.copy(_eF).multiplyScalar(-1);
         u.uObjectH.value = e.h;
     }
 }
@@ -1024,9 +1058,10 @@ let yawAccum = 0;
 let pitchAccum = 0;
 const MOUSE_SENSITIVITY = 0.002;
 // Third-person pitch range: total camera elevation = ORBIT_BASE_ANGLE (0.20) +
-// pitch, clamped so it stays in [~3°, ~80°] above the ground at the player.
-const PITCH_MIN = -0.15;
-const PITCH_MAX = 1.20;
+// pitch. Wide range so the camera can swing from near-horizontal-with-the-player
+// up to nearly straight overhead.
+const PITCH_MIN = -0.30;
+const PITCH_MAX = 1.40;
 
 intrinsicCanvas.addEventListener('click', () => {
     if (!pointerLocked) intrinsicCanvas.requestPointerLock();
