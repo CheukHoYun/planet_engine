@@ -53,6 +53,12 @@
         width: 100%;
         height: 100%;
     }
+    #intrinsicCanvas {
+        background: linear-gradient(to bottom, #3a6ea5 0%, #9bc4e2 100%);
+    }
+    #extrinsicCanvas {
+        background: #0a0a10;
+    }
     #footer {
         flex: 0 0 auto;
         padding: 6px 12px;
@@ -93,6 +99,7 @@
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
     <span>Markers: <span id="markerCount">0</span></span>
+    <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
     <span id="helpText">Click left to lock · WASD · Mouse to look · Space drops a marker · Drag right to orbit · Wheel to zoom</span>
 </div>
 <div id="panels">
@@ -122,13 +129,13 @@
 import * as THREE from 'three';
 
 // ===== Constants =====
-const R = 500.0;
+let   R = 500.0;                     // mutable: the R slider rebinds it live
+const R_INITIAL = 500.0;             // the radius the extrinsic sphere geometry was built with
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 25.0;            // m/s
 const GRID_N = 121;                  // ground patch resolution
 const GRID_HALF_ARC = 150.0;         // half-extent of the tangent-plane ground patch, in meters
 const PLAYER_COLOR = 0xff5e8a;
-const SKY_COLOR = 0x6ca8d4;          // mid-blue, sky in intrinsic view
 
 // ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
 class Frame {
@@ -292,6 +299,9 @@ const EXTRINSIC_FRAGMENT_SHADER = `
         float theta = atan(n.z, n.x);
         float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
         float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        // Fade longitude lines very close to the poles to avoid coord-singularity flicker.
+        float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(n.y));
+        gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
         vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
         gl_FragColor = vec4(color, 1.0);
@@ -343,6 +353,8 @@ const INTRINSIC_FRAGMENT_SHADER = `
         float theta = atan(hitPoint.z, hitPoint.x);
         float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
         float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(hitPoint.y));
+        gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
         vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
         gl_FragColor = vec4(color, 1.0);
@@ -559,42 +571,49 @@ function makeStripedPole(upWorld) {
     const BAND_H = TOTAL_H / N_BANDS;
     const bandGeo = new THREE.BoxGeometry(POLE_W, BAND_H, POLE_W);
 
-    const makeIntrinsic = () => {
-        const g = new THREE.Group();
-        for (let i = 0; i < N_BANDS; i++) {
-            const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
-            const band = new THREE.Mesh(bandGeo, mat);
-            band.position.y = i * BAND_H + BAND_H / 2;
-            g.add(band);
-        }
-        return g;
-    };
+    const intrinsicMesh = new THREE.Group();
+    for (let i = 0; i < N_BANDS; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
+        const band = new THREE.Mesh(bandGeo, mat);
+        band.position.y = i * BAND_H + BAND_H / 2;
+        intrinsicMesh.add(band);
+    }
 
     // Extrinsic version: each band's width scaled by (R + h_band) / R — the
     // visible "trapezoid" effect of S²×ℝ's product metric. Same arc length is
-    // a wider Euclidean width when embedded at greater radius.
-    const makeExtrinsic = () => {
-        const g = new THREE.Group();
-        for (let i = 0; i < N_BANDS; i++) {
-            const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
-            const band = new THREE.Mesh(bandGeo, mat);
-            const cy = i * BAND_H + BAND_H / 2;
-            band.position.y = cy;
-            const widen = (R + cy) / R;
-            band.scale.x = widen;
-            band.scale.z = widen;
-            g.add(band);
-        }
-        return g;
-    };
+    // a wider Euclidean width when embedded at greater radius. Bands are
+    // exposed so we can rescale them live when R changes.
+    const extrinsicMesh = new THREE.Group();
+    const extrinsicBands = [];
+    for (let i = 0; i < N_BANDS; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
+        const band = new THREE.Mesh(bandGeo, mat);
+        band.position.y = i * BAND_H + BAND_H / 2;
+        extrinsicMesh.add(band);
+        extrinsicBands.push(band);
+    }
 
-    return {
+    const pole = {
         kind: 'pole',
-        intrinsicMesh: makeIntrinsic(),
-        extrinsicMesh: makeExtrinsic(),
+        intrinsicMesh,
+        extrinsicMesh,
+        extrinsicBands,
+        bandHeight: BAND_H,
         upWorld,
         h: 0
     };
+    rescalePoleBands(pole);
+    return pole;
+}
+
+function rescalePoleBands(pole) {
+    for (let i = 0; i < pole.extrinsicBands.length; i++) {
+        const band = pole.extrinsicBands[i];
+        const cy = i * pole.bandHeight + pole.bandHeight / 2;
+        const widen = (R + cy) / R;
+        band.scale.x = widen;
+        band.scale.z = widen;
+    }
 }
 
 // Marker — a small colored cylinder, dropped by the player. The marker's
@@ -787,7 +806,7 @@ function makeExtrinsicView(canvas) {
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, sphere, playerMarker, resize, render };
+    return { scene, camera, renderer, sphere, playerMarker, orbit, applyOrbit, resize, render };
 }
 
 // ===== Intrinsic view: standard Three.js camera looking at a flat plane.
@@ -796,7 +815,7 @@ function makeExtrinsicView(canvas) {
 // pushed to the ground shader; pitch is the only camera rotation.
 function makeIntrinsicView(canvas) {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(SKY_COLOR);
+    // Sky comes from a CSS gradient on the canvas; let WebGL clear transparently.
 
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
@@ -805,8 +824,9 @@ function makeIntrinsicView(canvas) {
     camera.position.set(0, EYE_HEIGHT, 0);
     camera.rotation.order = 'YXZ';
 
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 0);
 
     function placeCamera(world) {
         camera.rotation.set(-world.pitch, 0, 0);
@@ -940,6 +960,49 @@ function dropMarker() {
     markerCountEl.textContent = String(markerCount);
 }
 
+// ===== R slider =====
+const rSlider = document.getElementById('rSlider');
+const rValueEl = document.getElementById('rValue');
+rSlider.disabled = false;
+rSlider.value = String(R);
+rValueEl.textContent = String(Math.round(R));
+
+rSlider.addEventListener('input', () => {
+    const newR = parseFloat(rSlider.value);
+    setR(newR);
+});
+
+function setR(newR) {
+    const oldR = R;
+    R = newR;
+    rValueEl.textContent = String(Math.round(R));
+    // Intrinsic shader: re-bind the world radius uniform.
+    intrinsicView.ground.material.uniforms.uR.value = R;
+    // Extrinsic sphere: rescale the existing geometry instead of rebuilding.
+    extrinsicView.sphere.scale.setScalar(R / R_INITIAL);
+    // Striped pole: recompute per-band scales.
+    for (const e of entities) {
+        if (e.kind === 'pole') rescalePoleBands(e);
+    }
+    // Orbit camera: keep the same fraction of R, then clamp to new bounds.
+    const ratio = newR / oldR;
+    extrinsicView.orbit.radius = Math.max(R * 1.1, Math.min(R * 20, extrinsicView.orbit.radius * ratio));
+    extrinsicView.camera.far = R * 50;
+    extrinsicView.camera.updateProjectionMatrix();
+    extrinsicView.applyOrbit();
+}
+
+// ===== Coordinate readout =====
+const coordsEl = document.getElementById('coords');
+function updateCoordsReadout() {
+    const up = world.frame.up();
+    const phi = Math.asin(Math.max(-1, Math.min(1, up.y)));
+    const theta = Math.atan2(up.z, up.x);
+    const t = (theta * 180 / Math.PI).toFixed(1);
+    const p = (phi   * 180 / Math.PI).toFixed(1);
+    coordsEl.textContent = `θ ${t}°   φ ${p}°`;
+}
+
 window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
@@ -1008,6 +1071,7 @@ function loop(now) {
     integrate(dt);
     world.frame.tick();
     updateEntities(dt);
+    updateCoordsReadout();
     intrinsicView.render(world);
     extrinsicView.render(world);
     requestAnimationFrame(loop);
