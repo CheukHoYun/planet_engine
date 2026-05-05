@@ -66,7 +66,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="1000" value="300"><span id="rValue">300</span></label>
-    <span id="helpText">Arrow keys: walk &amp; jump · Wheel over a view: zoom (left = camera FOV; right = planet scale) · R slider: world radius</span>
+    <span id="helpText">Arrow keys: walk &amp; jump · Wheel: zoom (left = camera FOV; right = planet scale) · Drag right view: pan · R slider: world radius</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -372,6 +372,11 @@ class ExtrinsicRenderer {
         this.scale = 1;
         this.displayR = 0;  // derived: world.R · this.scale (set per render)
         this._scaleInitialized = false;
+        // World-center offset from canvas center, in canvas pixels. Updated
+        // by drag-to-pan; zoom keeps the point under the cursor fixed by
+        // also updating these.
+        this.offsetX = 0;
+        this.offsetY = 0;
         // Offscreen layer for entity pixels. We build it as raw RGBA bytes
         // (per-pixel reverse mapping) and composite onto the main canvas via
         // drawImage so it alpha-blends with the planet ground beneath.
@@ -402,8 +407,8 @@ class ExtrinsicRenderer {
         const ctx = this.ctx;
         const w = this.canvas.width;
         const h = this.canvas.height;
-        const cx = w / 2;
-        const cy = h / 2;
+        const cx = w / 2 + this.offsetX;
+        const cy = h / 2 + this.offsetY;
         const R = this.world.R;
         const scale = this.scale;
         // Planet's screen radius is now derived from world.R and the view's
@@ -831,8 +836,55 @@ extrinsicCanvas.addEventListener('wheel', (ev) => {
     ev.preventDefault();
     // scroll up (deltaY < 0) → zoom in → larger scale
     const factor = Math.exp(-ev.deltaY * 0.0012);
-    extrinsic.scale = Math.max(0.02, Math.min(20, extrinsic.scale * factor));
+    const newScale = Math.max(0.02, Math.min(20, extrinsic.scale * factor));
+    if (newScale === extrinsic.scale) return;
+    // Keep the world point under the cursor stationary on screen: solve
+    // (mx − cx_new) = (newScale/oldScale) · (mx − cx_old).
+    const ratio = newScale / extrinsic.scale;
+    const rect = extrinsicCanvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    const halfW = extrinsicCanvas.width * 0.5;
+    const halfH = extrinsicCanvas.height * 0.5;
+    const cxOld = halfW + extrinsic.offsetX;
+    const cyOld = halfH + extrinsic.offsetY;
+    extrinsic.offsetX = (mx + ratio * (cxOld - mx)) - halfW;
+    extrinsic.offsetY = (my + ratio * (cyOld - my)) - halfH;
+    extrinsic.scale = newScale;
 }, { passive: false });
+
+// Drag-to-pan on the right view. Pointer events handle mouse + touch + pen
+// uniformly; setPointerCapture keeps the drag alive even if the cursor
+// leaves the canvas mid-drag.
+{
+    let dragging = false;
+    let startClientX = 0, startClientY = 0;
+    let startOffsetX = 0, startOffsetY = 0;
+    extrinsicCanvas.style.cursor = 'grab';
+    extrinsicCanvas.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        dragging = true;
+        startClientX = ev.clientX;
+        startClientY = ev.clientY;
+        startOffsetX = extrinsic.offsetX;
+        startOffsetY = extrinsic.offsetY;
+        extrinsicCanvas.setPointerCapture(ev.pointerId);
+        extrinsicCanvas.style.cursor = 'grabbing';
+    });
+    extrinsicCanvas.addEventListener('pointermove', (ev) => {
+        if (!dragging) return;
+        extrinsic.offsetX = startOffsetX + (ev.clientX - startClientX);
+        extrinsic.offsetY = startOffsetY + (ev.clientY - startClientY);
+    });
+    const endDrag = (ev) => {
+        if (!dragging) return;
+        dragging = false;
+        try { extrinsicCanvas.releasePointerCapture(ev.pointerId); } catch (e) {}
+        extrinsicCanvas.style.cursor = 'grab';
+    };
+    extrinsicCanvas.addEventListener('pointerup', endDrag);
+    extrinsicCanvas.addEventListener('pointercancel', endDrag);
+}
 
 function resize() {
     for (const c of [intrinsicCanvas, extrinsicCanvas]) {
