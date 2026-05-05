@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S¹ × ℝ Engine — Phase 1</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #111;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
+    }
+    body {
+        display: flex;
+        flex-direction: column;
+    }
+    #controls {
+        flex: 0 0 auto;
+        padding: 8px 12px;
+        background: #1c1c1c;
+        border-bottom: 1px solid #333;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 13px;
+    }
+    #controls label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    #controls input[type=range] {
+        width: 200px;
+    }
+    #panels {
+        flex: 1 1 auto;
+        display: flex;
+        min-height: 0;
+    }
+    .panel {
+        flex: 1 1 50%;
+        position: relative;
+        border-left: 1px solid #333;
+    }
+    .panel:first-child {
+        border-left: none;
+    }
+    canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+    #footer {
+        flex: 0 0 auto;
+        padding: 6px 12px;
+        background: #1c1c1c;
+        border-top: 1px solid #333;
+        font-size: 12px;
+        color: #aaa;
+    }
+</style>
+</head>
+<body>
+<div id="controls">
+    <label>R: <input id="rSlider" type="range" min="100" max="1000" value="300"><span id="rValue">300</span></label>
+    <span id="helpText">Arrow keys: walk &amp; jump · Wheel over a view: zoom (left = camera FOV; right = planet scale) · R slider: world radius</span>
+</div>
+<div id="panels">
+    <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
+    <div class="panel"><canvas id="extrinsicCanvas"></canvas></div>
+</div>
+<div id="footer">Left: intrinsic (inhabitant view). Right: extrinsic (god view).</div>
+<script>
+'use strict';
+
+const TWO_PI = Math.PI * 2;
+
+function wrapAngle(theta) {
+    theta = theta % TWO_PI;
+    if (theta < 0) theta += TWO_PI;
+    return theta;
+}
+
+function signedArcDistance(t1, t2, R) {
+    let d = t2 - t1;
+    while (d > Math.PI) d -= TWO_PI;
+    while (d < -Math.PI) d += TWO_PI;
+    return d * R;
+}
+
+function arcDistance(t1, t2, R) {
+    return Math.abs(signedArcDistance(t1, t2, R));
+}
+
+class Entity {
+    constructor(theta, h, width, height) {
+        this.θ = theta;
+        this.h = h;
+        this.width = width;
+        this.height = height;
+        this.vθ = 0;
+        this.vh = 0;
+        this.affectedByGravity = true;
+        this.solid = true;
+        this.alive = true;
+        this.type = '';
+        this.facing = 1;
+        // True after this entity rests on the world floor or on top of a
+        // solid entity at the end of the most recent World.update tick.
+        this.grounded = false;
+        // Sprite: a CanvasImageSource (HTMLCanvasElement, OffscreenCanvas, or
+        // HTMLImageElement) of size (width, height) drawn in plain intrinsic
+        // coordinates: top-left origin, y-down. The renderers consume it and
+        // perform any view-specific warping. If null, the entity is invisible.
+        this.sprite = null;
+    }
+}
+
+class World {
+    constructor(R) {
+        this.R = R;
+        this.circumference = TWO_PI * R;
+        this.entities = [];
+        this.gravity = 600;
+    }
+
+    setRadius(newR) {
+        this.R = newR;
+        this.circumference = TWO_PI * newR;
+    }
+
+    createEntity(theta, h, width, height) {
+        const e = new Entity(theta, h, width, height);
+        this.entities.push(e);
+        return e;
+    }
+
+    removeEntity(e) {
+        const i = this.entities.indexOf(e);
+        if (i >= 0) this.entities.splice(i, 1);
+    }
+
+    update(dt) {
+        // Snapshot prev h for continuous collision detection on landings,
+        // and reset the grounded flag — it's set later by ground/platform
+        // resolution if the entity is at rest on a surface this tick.
+        const prevH = new Map();
+        for (const e of this.entities) {
+            if (!e.alive) continue;
+            prevH.set(e, e.h);
+            e.grounded = false;
+
+            // Geodesic on S¹: constant angular velocity, wrap.
+            e.θ = wrapAngle(e.θ + e.vθ * dt);
+            // Independent ℝ axis: gravity + integrate vh.
+            if (e.affectedByGravity) e.vh -= this.gravity * dt;
+            e.h += e.vh * dt;
+        }
+
+        // Ground (h = 0): the world's surface is the floor everywhere.
+        for (const e of this.entities) {
+            if (!e.alive) continue;
+            if (e.h < 0) { e.h = 0; e.vh = 0; e.grounded = true; }
+        }
+
+        // Solid-on-top landings. Any solid entity's top face acts as a platform.
+        // CCD: if a faller's bottom was at-or-above the platform top last frame
+        // and is now below while still moving downward (vh ≤ 0) and its angular
+        // range overlaps the platform's, snap to the top. One-way: rising
+        // entities pass through (Mario-style).
+        const R = this.R;
+        for (const e of this.entities) {
+            if (!e.alive) continue;
+            for (const p of this.entities) {
+                if (p === e || !p.alive || !p.solid) continue;
+                if (arcDistance(e.θ, p.θ, R) > (p.width + e.width) * 0.5) continue;
+                const top = p.h + p.height;
+                const before = prevH.get(e);
+                if (before >= top - 0.001 && e.h < top && e.vh <= 0) {
+                    e.h = top;
+                    e.vh = 0;
+                    e.grounded = true;
+                }
+            }
+        }
+    }
+
+    // Pairwise overlap test in (θ, h). Returns null if disjoint, otherwise
+    // {arcDist, hDist, penArc, penH}: signed arc distance from a to b, signed
+    // h offset (a-bottom minus b-bottom), and the penetration depths in each
+    // axis (positive = how deep they overlap). Game layer decides the response.
+    checkOverlap(a, b) {
+        if (a === b) return null;
+        // h-range overlap (h is the entity's bottom, height extends upward)
+        if (a.h >= b.h + b.height || b.h >= a.h + a.height) return null;
+        const ad = arcDistance(a.θ, b.θ, this.R);
+        const aThreshold = (a.width + b.width) * 0.5;
+        if (ad > aThreshold) return null;
+        // Penetration depths
+        const penArc = aThreshold - ad;
+        const penH = Math.min(a.h + a.height, b.h + b.height)
+                   - Math.max(a.h, b.h);
+        return {
+            arcDist: signedArcDistance(a.θ, b.θ, this.R),
+            hDist:   a.h - b.h,
+            penArc,
+            penH,
+        };
+    }
+
+    getCollisions() {
+        const pairs = [];
+        const ents = this.entities;
+        for (let i = 0; i < ents.length; i++) {
+            const a = ents[i];
+            if (!a.alive) continue;
+            for (let j = i + 1; j < ents.length; j++) {
+                const b = ents[j];
+                if (!b.alive) continue;
+                const info = this.checkOverlap(a, b);
+                if (info) pairs.push({ a, b, info });
+            }
+        }
+        return pairs;
+    }
+}
+
+// Camera: a real geometric object on the manifold. Has a position (θ, h), a
+// facing direction (±1 along S¹), and an angular field of view (radians of
+// arc-distance visible across the intrinsic view). Optionally tracks a
+// target entity by copying its θ each frame. The camera is *the* observer
+// — there are no screen-space tricks layered on top of it.
+class Camera {
+    constructor(world) {
+        this.world = world;
+        this.θ = 0;
+        this.h = 0;
+        this.facing = 1;
+        this.fov = 2.4;
+        this.target = null;
+    }
+    setTarget(entity) { this.target = entity; }
+    update() {
+        if (this.target) {
+            this.θ = this.target.θ;
+            this.h = this.target.h;
+        }
+    }
+}
+
+class IntrinsicRenderer {
+    constructor(canvas, world, camera) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.world = world;
+        this.camera = camera;
+        // Screen-y at which the camera's h sits. With camera.h tracking the
+        // player, this becomes "where the player's foot anchors on screen."
+        // At camera.h = 0 it coincides with the world's ground line.
+        this.anchorY = 0;
+        this.recomputeLayout();
+    }
+
+    recomputeLayout() {
+        this.anchorY = Math.floor(this.canvas.height * 0.75);
+    }
+
+    pxPerArc() {
+        return this.canvas.width / (this.camera.fov * this.world.R);
+    }
+
+    // Visible (θ, h) region of the manifold this view currently shows.
+    getViewportRect() {
+        const px = this.pxPerArc();
+        return {
+            θCenter: this.camera.θ,
+            fov:     this.camera.fov,
+            hHigh:   this.camera.h + this.anchorY / px,
+            hLow:    this.camera.h - (this.canvas.height - this.anchorY) / px,
+        };
+    }
+
+    render() {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        const R = this.world.R;
+        const fov = this.camera.fov;
+        const camH = this.camera.h;
+        const anchor = this.anchorY;
+        // pixels per radian of arc-distance, set by the camera's angular FOV
+        // and the canvas width — exactly the relationship between a real
+        // lens's focal length and its image plane width.
+        const pxPerRad = w / fov;
+        const pxPerArc = pxPerRad / R;
+        const halfFov = fov * 0.5;
+
+        // canvas y at which world-h = 0 currently sits (ground line). When
+        // camera.h rises with the player, the ground line drops on screen.
+        const groundScreenY = anchor + camH * pxPerArc;
+
+        // Sky (above ground line)
+        const skyEnd = Math.max(0, Math.min(h, groundScreenY));
+        if (skyEnd > 0) {
+            const sky = ctx.createLinearGradient(0, 0, 0, skyEnd);
+            sky.addColorStop(0, '#3a6ea5');
+            sky.addColorStop(1, '#9bc4e2');
+            ctx.fillStyle = sky;
+            ctx.fillRect(0, 0, w, skyEnd);
+        }
+
+        // Ground band (below ground line)
+        if (skyEnd < h) {
+            ctx.fillStyle = '#5b3a1e';
+            ctx.fillRect(0, skyEnd, w, h - skyEnd);
+        }
+
+        // Ground line
+        if (groundScreenY >= 0 && groundScreenY <= h) {
+            ctx.strokeStyle = '#2a1808';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, groundScreenY);
+            ctx.lineTo(w, groundScreenY);
+            ctx.stroke();
+        }
+
+        // Universal-cover rendering. Every entity has infinitely many
+        // geodesic images visible from the camera: from the camera at θ_c,
+        // the entity at θ_e is reached by any geodesic of signed length
+        // d/R = (θ_e - θ_c) + 2π·n for n ∈ ℤ. We enumerate every n whose
+        // image falls in the camera FOV (no caps; no decorative duplicates)
+        // and render each. This is the universal cover ℝ of S¹ unfolded by
+        // the camera; in 3D on S² × ℝ the same shape applies (multiple
+        // great-circle paths from camera to entity, each rendered once).
+        for (const e of this.world.entities) {
+            if (!e.alive || !e.sprite) continue;
+            const canonicalΔθ = signedArcDistance(this.camera.θ, e.θ, R) / R;
+            const halfWθ = (e.width / R) * 0.5;
+            const lo = (-halfFov - halfWθ - canonicalΔθ) / TWO_PI;
+            const hi = ( halfFov + halfWθ - canonicalΔθ) / TWO_PI;
+            const nMin = Math.ceil(lo);
+            const nMax = Math.floor(hi);
+
+            const dw = e.width * pxPerArc;
+            const dh = e.height * pxPerArc;
+            // sprite top in canvas-y: anchor − (h_top − camera.h)·px
+            const dyTop = anchor - (e.h + e.height - camH) * pxPerArc;
+
+            for (let n = nMin; n <= nMax; n++) {
+                const Δθ = canonicalΔθ + n * TWO_PI;
+                const screenX = w * 0.5 + Δθ * pxPerRad;
+                const dxLeft = screenX - dw * 0.5;
+                ctx.drawImage(e.sprite, dxLeft, dyTop, dw, dh);
+            }
+        }
+    }
+}
+
+class ExtrinsicRenderer {
+    constructor(canvas, world, intrinsic) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.world = world;
+        this.intrinsic = intrinsic;  // for the viewfinder overlay
+        // canvas pixels per world pixel — the extrinsic view's zoom. Scrolling
+        // adjusts it. R changes do NOT touch it, so changing R grows or
+        // shrinks the planet on screen while entities keep their pixel size.
+        this.scale = 1;
+        this.displayR = 0;  // derived: world.R · this.scale (set per render)
+        this._scaleInitialized = false;
+        // Offscreen layer for entity pixels. We build it as raw RGBA bytes
+        // (per-pixel reverse mapping) and composite onto the main canvas via
+        // drawImage so it alpha-blends with the planet ground beneath.
+        this.layerCanvas = document.createElement('canvas');
+        this.layerCtx = this.layerCanvas.getContext('2d');
+        this.layerImageData = null;
+        this.layerBuffer = null;
+        this.recomputeLayout();
+    }
+
+    recomputeLayout() {
+        const w = this.canvas.width, h = this.canvas.height;
+        if (!this._scaleInitialized) {
+            // First-run default: pick a scale so the world's planet fills
+            // ~70% of the smaller canvas dimension at the current R.
+            this.scale = (Math.min(w, h) * 0.35) / Math.max(this.world.R, 1);
+            this._scaleInitialized = true;
+        }
+        if (this.layerCanvas.width !== w || this.layerCanvas.height !== h) {
+            this.layerCanvas.width = w;
+            this.layerCanvas.height = h;
+            this.layerImageData = this.layerCtx.createImageData(w, h);
+            this.layerBuffer = this.layerImageData.data;
+        }
+    }
+
+    render() {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        const cx = w / 2;
+        const cy = h / 2;
+        const R = this.world.R;
+        const scale = this.scale;
+        // Planet's screen radius is now derived from world.R and the view's
+        // own zoom — independent of canvas size or anything else.
+        this.displayR = R * scale;
+
+        // Background
+        ctx.fillStyle = '#0a0a10';
+        ctx.fillRect(0, 0, w, h);
+
+        // Filled circle interior
+        ctx.fillStyle = '#5b3a1e';
+        ctx.beginPath();
+        ctx.arc(cx, cy, this.displayR, 0, TWO_PI);
+        ctx.fill();
+
+        // Surface outline
+        ctx.strokeStyle = '#2a1808';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Per-pixel reverse rendering. For every canvas pixel in the entity's
+        // bounding box, evaluate the inverse embedding to recover the world
+        // (θ, h) point that pixel represents, then check whether any entity
+        // covers it. If yes, sample the entity's sprite at the corresponding
+        // (sx, sy) and write the pixel.
+        //
+        // This is the embedding evaluated directly — no chords, no tangent
+        // rectangles, no per-row approximations. The entity's silhouette in
+        // canvas is whatever the sub-pixel rasterizer produces from the same
+        // pixel-level evaluation that draws the planet outline.
+        const buf = this.layerBuffer;
+        const W = w | 0;
+        const H = h | 0;
+        // Clear the layer to fully transparent.
+        buf.fill(0);
+
+        for (const e of this.world.entities) {
+            if (!e.alive || !e.sprite) continue;
+            // Lazy-extract sprite pixel data (RGBA bytes). The cache is
+            // invalidated by clearing e._spritePixels (e.g., when the sprite
+            // is replaced — see rebuildPlayerSprite).
+            if (!e._spritePixels || e._spriteRef !== e.sprite) {
+                const sCtx = e.sprite.getContext('2d');
+                e._spritePixels = sCtx.getImageData(0, 0, e.sprite.width, e.sprite.height).data;
+                e._spriteW = e.sprite.width;
+                e._spriteH = e.sprite.height;
+                e._spriteRef = e.sprite;
+            }
+            const sP = e._spritePixels;
+            const sW = e._spriteW;
+            const sH = e._spriteH;
+
+            const halfWθ = (e.width / R) * 0.5;
+            const hBot = e.h;
+            const hTop = e.h + e.height;
+            const rMin = this.displayR + hBot * scale;
+            const rMax = this.displayR + hTop * scale;
+            const rMin2 = rMin * rMin;
+            const rMax2 = rMax * rMax;
+            // Cached locals so the hot loop has no property reads.
+            const dispR = this.displayR;
+            const invScale = 1 / scale;
+            const cosE = Math.cos(e.θ);
+            const sinE = Math.sin(e.θ);
+            // Half-angular-width converted to a tan threshold so we can do
+            // the angular sector cull with a single multiply + compare instead
+            // of an atan2 call. Safe because halfWθ is well below π/2 for any
+            // realistic entity (would need width > π·R to violate it).
+            const tanHW = Math.tan(halfWθ);
+
+            // Canvas bounding box: convex hull of the sector's corner points
+            // plus its mid-arc apex (which can extend the bbox when a critical
+            // angle falls inside the sector).
+            const θ0 = e.θ - halfWθ;
+            const θ1 = e.θ + halfWθ;
+            let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+            const probe = (θ, r) => {
+                const x = cx + r * Math.sin(θ);
+                const y = cy - r * Math.cos(θ);
+                if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y; if (y > by1) by1 = y;
+            };
+            probe(θ0, rMin); probe(θ1, rMin); probe(θ0, rMax); probe(θ1, rMax);
+            probe(e.θ, rMin); probe(e.θ, rMax);
+
+            const ix0 = Math.max(0, Math.floor(bx0) - 1);
+            const iy0 = Math.max(0, Math.floor(by0) - 1);
+            const ix1 = Math.min(W, Math.ceil(bx1)  + 1);
+            const iy1 = Math.min(H, Math.ceil(by1)  + 1);
+            if (ix1 <= ix0 || iy1 <= iy0) continue;
+
+            for (let py = iy0; py < iy1; py++) {
+                const ry = py + 0.5 - cy;
+                const rySin = ry * sinE;
+                const ryCos = ry * cosE;
+                const rowOff = py * W;
+                for (let px = ix0; px < ix1; px++) {
+                    const rx = px + 0.5 - cx;
+                    // Rotate (rx, ry) by -e.θ into the entity's local frame.
+                    // ryNeg = -ry_local; positive when the pixel is on the
+                    // entity's side of the world center.
+                    const ryNeg = rx * sinE - ryCos;
+                    if (ryNeg <= 0) continue;
+                    const rxLocal = rx * cosE + rySin;
+                    // Angular sector cull: |tan dθ| < tan(halfWθ), i.e.
+                    // |rxLocal| < tanHW · ryNeg. Cheap, and rejects the bulk
+                    // of bbox pixels before paying for sqrt or atan2.
+                    const absRx = rxLocal < 0 ? -rxLocal : rxLocal;
+                    if (absRx >= tanHW * ryNeg) continue;
+                    const r2 = rx * rx + ry * ry;
+                    if (r2 < rMin2 || r2 > rMax2) continue;
+                    const rPix = Math.sqrt(r2);
+                    const worldH = (rPix - dispR) * invScale;
+
+                    // Sprite indexing — atan2 only here, on pixels we know
+                    // are inside the sector.
+                    const dθ = Math.atan2(rxLocal, ryNeg);
+                    let sx = ((dθ + halfWθ) * R) | 0;
+                    if (sx >= sW) sx = sW - 1;
+                    let sy = (hTop - worldH) | 0;
+                    if (sy >= sH) sy = sH - 1;
+
+                    const si = (sy * sW + sx) << 2;
+                    const sa = sP[si + 3];
+                    if (sa === 0) continue;
+
+                    const di = (rowOff + px) << 2;
+                    buf[di]     = sP[si];
+                    buf[di + 1] = sP[si + 1];
+                    buf[di + 2] = sP[si + 2];
+                    buf[di + 3] = sa;
+                }
+            }
+        }
+
+        // Composite the entity layer onto the planet via alpha blending.
+        this.layerCtx.putImageData(this.layerImageData, 0, 0);
+        ctx.drawImage(this.layerCanvas, 0, 0);
+
+        // Viewfinder overlay: the (θ, h) region currently visible in the
+        // intrinsic camera. In the embedding this is a true annular sector,
+        // bounded by two radial lines (the FOV edges) and two arcs (the top
+        // and bottom of the canvas in world h). We draw it directly with
+        // ctx.arc — the curved edges ARE arcs of the surface circle.
+        if (this.intrinsic) {
+            const v = this.intrinsic.getViewportRect();
+            this.drawViewfinder(ctx, cx, cy, scale, v);
+        }
+    }
+
+    drawViewfinder(ctx, cx, cy, scale, v) {
+        const halfFov = v.fov * 0.5;
+        const θL = v.θCenter - halfFov;
+        const θR = v.θCenter + halfFov;
+        const rHigh = Math.max(0, this.displayR + v.hHigh * scale);
+        const rLow  = Math.max(0, this.displayR + v.hLow  * scale);
+        const fullCircle = v.fov >= TWO_PI;
+
+        ctx.save();
+        ctx.beginPath();
+        if (fullCircle) {
+            // Visible θ range covers (or exceeds) the whole circle: an annulus.
+            ctx.arc(cx, cy, rHigh, 0, TWO_PI, false);
+            ctx.arc(cx, cy, rLow,  0, TWO_PI, true);
+        } else {
+            // Annular sector. Canvas's arc(...) measures angle from canvas +x
+            // axis; our θ is from canvas -y (12 o'clock), so canvas angle =
+            // θ − π/2. The default direction (anticlockwise=false) advances in
+            // the same direction θ does in our convention.
+            const aL = θL - Math.PI / 2;
+            const aR = θR - Math.PI / 2;
+            ctx.arc(cx, cy, rLow,  aL, aR, false);  // bottom arc, low → high θ
+            ctx.lineTo(cx + rHigh * Math.sin(θR), cy - rHigh * Math.cos(θR));
+            ctx.arc(cx, cy, rHigh, aR, aL, true);   // top arc, back high → low θ
+            ctx.closePath();
+        }
+        ctx.fillStyle = 'rgba(255,230,120,0.10)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,230,120,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+    }
+}
+
+// ---- Bootstrap ----
+
+const intrinsicCanvas = document.getElementById('intrinsicCanvas');
+const extrinsicCanvas = document.getElementById('extrinsicCanvas');
+const rSlider = document.getElementById('rSlider');
+const rValue = document.getElementById('rValue');
+
+const world = new World(parseInt(rSlider.value, 10));
+const camera = new Camera(world);
+const intrinsic = new IntrinsicRenderer(intrinsicCanvas, world, camera);
+const extrinsic = new ExtrinsicRenderer(extrinsicCanvas, world, intrinsic);
+
+rSlider.addEventListener('input', () => {
+    const newR = parseInt(rSlider.value, 10);
+    rValue.textContent = String(newR);
+    world.setRadius(newR);
+});
+
+// Sprite helper. The drawFn receives a 2D ctx and the sprite's pixel size,
+// and paints into the box (0,0)-(w,h). The engine treats whatever it paints
+// as opaque content and warps it correctly in either view.
+function makeSprite(width, height, drawFn) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil(width));
+    c.height = Math.max(1, Math.ceil(height));
+    drawFn(c.getContext('2d'), c.width, c.height);
+    return c;
+}
+
+function solidRectSprite(w, h, color) {
+    return makeSprite(w, h, (ctx) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    });
+}
+
+// Spawn test entities
+const walkerA = world.createEntity(0, 0, 20, 24);
+walkerA.type = 'walkerA';
+walkerA.sprite = solidRectSprite(20, 24, '#e84c4c');
+walkerA.affectedByGravity = false;
+walkerA.vθ = 0.6;
+
+const walkerB = world.createEntity(Math.PI / 2, 0, 20, 24);
+walkerB.type = 'walkerB';
+walkerB.sprite = solidRectSprite(20, 24, '#4ce8a8');
+walkerB.affectedByGravity = false;
+walkerB.vθ = -1.0;
+
+const faller = world.createEntity(Math.PI, 200, 16, 16);
+faller.type = 'faller';
+faller.sprite = solidRectSprite(16, 16, '#f0c419');
+faller.affectedByGravity = true;
+
+const geodesic = world.createEntity(3 * Math.PI / 2, 100, 14, 14);
+geodesic.type = 'geodesic';
+geodesic.sprite = solidRectSprite(14, 14, '#c084ff');
+geodesic.affectedByGravity = false;
+geodesic.vθ = 2.0;
+
+// Tall multi-banded pole. The sprite has a stack of fixed-width-and-height
+// stripes — completely uniform in the sprite. The extrinsic view should
+// fan it outward: each band gets visibly wider as h increases.
+const pole = world.createEntity(Math.PI / 4, 0, 12, 300);
+pole.type = 'pole';
+pole.sprite = makeSprite(12, 300, (ctx, w, h) => {
+    const colors = ['#e84c4c', '#f0f0f0', '#4c8ae8', '#f0f0f0',
+                    '#e8c84c', '#f0f0f0', '#4ce884', '#f0f0f0',
+                    '#c084ff', '#f0f0f0'];
+    const bandH = h / colors.length;
+    colors.forEach((color, i) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(0, i * bandH, w, bandH + 1);
+    });
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+});
+pole.affectedByGravity = false;
+
+// Irregular sprite: a tree (round green canopy + brown trunk). Nothing in
+// the sprite drawing code knows about the world — it's just pixels. The
+// engine warps it correctly: in the intrinsic view it looks like a normal
+// tree; in the extrinsic view the canopy is stretched even wider than its
+// base, and the canopy's curvature is bent radially.
+const tree = world.createEntity(-Math.PI / 3, 0, 60, 120);
+tree.type = 'tree';
+tree.sprite = makeSprite(60, 120, (ctx, w, h) => {
+    // Trunk (bottom 40px, centered, 14 wide)
+    ctx.fillStyle = '#7a4a22';
+    const trunkW = 14;
+    ctx.fillRect((w - trunkW) / 2, h - 40, trunkW, 40);
+    // Canopy (round green blob in the top portion)
+    ctx.fillStyle = '#2f8a3f';
+    ctx.beginPath();
+    ctx.arc(w / 2, 40, 28, 0, TWO_PI);
+    ctx.fill();
+    ctx.fillStyle = '#3fa64f';
+    ctx.beginPath();
+    ctx.arc(w / 2 - 10, 32, 18, 0, TWO_PI);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(w / 2 + 12, 36, 16, 0, TWO_PI);
+    ctx.fill();
+});
+tree.affectedByGravity = false;
+
+// Smiley face floating at h=180. Demonstrates that small features inside a
+// sprite (eyes, mouth) end up visibly stretched at higher h in the extrinsic
+// view, while looking like a plain face in the intrinsic view.
+const face = world.createEntity(Math.PI * 1.2, 180, 50, 50);
+face.type = 'face';
+face.sprite = makeSprite(50, 50, (ctx, w, h) => {
+    ctx.fillStyle = '#ffd84a';
+    ctx.beginPath();
+    ctx.arc(w / 2, h / 2, w / 2 - 1, 0, TWO_PI);
+    ctx.fill();
+    ctx.strokeStyle = '#7a5a00';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath(); ctx.arc(w * 0.35, h * 0.4, 4, 0, TWO_PI); ctx.fill();
+    ctx.beginPath(); ctx.arc(w * 0.65, h * 0.4, 4, 0, TWO_PI); ctx.fill();
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(w / 2, h * 0.55, 12, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+});
+face.affectedByGravity = false;
+
+// Static platforms — solid entities that act as landing surfaces. The
+// landing collision is handled in World.update purely from their h-range
+// and angular extent; nothing here is platform-specific.
+function spawnPlatform(θ, h, width, height) {
+    const p = world.createEntity(θ, h, width, height);
+    p.type = 'platform';
+    p.affectedByGravity = false;
+    p.solid = true;
+    p.sprite = makeSprite(width, height, (ctx, w, hh) => {
+        ctx.fillStyle = '#7a4a22';
+        ctx.fillRect(0, 0, w, hh);
+        // Grass cap
+        ctx.fillStyle = '#3a8c3a';
+        ctx.fillRect(0, 0, w, Math.max(3, hh * 0.18));
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(0.5, 0.5, w - 1, hh - 1);
+    });
+    return p;
+}
+spawnPlatform(0.9, 70, 110, 16);
+spawnPlatform(1.7, 130, 90, 16);
+spawnPlatform(2.5, 60, 120, 16);
+spawnPlatform(-0.8, 100, 100, 16);
+spawnPlatform(-1.6, 50, 80, 16);
+
+// Player. Input maps strictly to physical quantities: arrow keys set vθ
+// (an angular velocity on S¹), up sets vh (a velocity on ℝ). Nothing
+// touches a view. Camera tracks the player's θ each frame.
+// Player's physical walking speed in arc-length pixels per second. The
+// angular speed depends on R: vθ = SPEED_ARC / R. A small world (small R)
+// makes the player circle it quickly; a large world feels flat.
+const SPEED_ARC = 180;      // pixels/s along the surface
+const JUMP_VEL  = 360;      // pixels/s — initial vh on jump
+const player = world.createEntity(0, 0, 22, 30);
+player.type = 'player';
+player.affectedByGravity = true;
+
+function rebuildPlayerSprite() {
+    player.sprite = makeSprite(player.width, player.height, (ctx, w, h) => {
+        // Body
+        ctx.fillStyle = '#ff5e8a';
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+        // Eyes — pupils shifted toward facing direction
+        const f = player.facing;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(w * 0.22, h * 0.25, 4, 5);
+        ctx.fillRect(w * 0.62, h * 0.25, 4, 5);
+        ctx.fillStyle = '#1a1a1a';
+        const px = f > 0 ? 2 : 0;
+        ctx.fillRect(w * 0.22 + px, h * 0.25 + 1, 2, 3);
+        ctx.fillRect(w * 0.62 + px, h * 0.25 + 1, 2, 3);
+        // Belt for visual reference
+        ctx.fillStyle = '#7a2848';
+        ctx.fillRect(0, h * 0.6, w, 2);
+    });
+}
+rebuildPlayerSprite();
+camera.setTarget(player);
+
+const keys = {};
+window.addEventListener('keydown', (ev) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(ev.key)) {
+        ev.preventDefault();
+    }
+    keys[ev.key] = true;
+    // Jump only on initial press (not browser key-repeat) and only when
+    // resting on a surface — the world floor or any solid entity's top.
+    if (ev.key === 'ArrowUp' && !ev.repeat && player.grounded) {
+        player.vh = JUMP_VEL;
+    }
+});
+window.addEventListener('keyup', (ev) => {
+    keys[ev.key] = false;
+});
+
+function applyPlayerInput() {
+    let walk = 0;
+    if (keys['ArrowLeft']) walk -= 1;
+    if (keys['ArrowRight']) walk += 1;
+    player.vθ = walk * SPEED_ARC / world.R;
+    if (walk !== 0) {
+        const newFacing = walk > 0 ? 1 : -1;
+        if (newFacing !== player.facing) {
+            player.facing = newFacing;
+            rebuildPlayerSprite();
+        }
+    }
+}
+
+// Mouse-wheel: zooms whichever view the cursor is over. The intrinsic wheel
+// changes the camera's angular FOV (its lens). The extrinsic wheel changes
+// the extrinsic view's canvas-pixels-per-world-pixel scale — independent of
+// world.R, so the planet's apparent size on screen is purely the user's
+// chosen zoom × world.R.
+intrinsicCanvas.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const factor = Math.exp(ev.deltaY * 0.0012);
+    camera.fov = Math.max(0.15, Math.min(14, camera.fov * factor));
+}, { passive: false });
+extrinsicCanvas.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    // scroll up (deltaY < 0) → zoom in → larger scale
+    const factor = Math.exp(-ev.deltaY * 0.0012);
+    extrinsic.scale = Math.max(0.02, Math.min(20, extrinsic.scale * factor));
+}, { passive: false });
+
+function resize() {
+    for (const c of [intrinsicCanvas, extrinsicCanvas]) {
+        const rect = c.getBoundingClientRect();
+        c.width = Math.max(1, Math.floor(rect.width));
+        c.height = Math.max(1, Math.floor(rect.height));
+    }
+    intrinsic.recomputeLayout();
+    extrinsic.recomputeLayout();
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+let lastT = performance.now();
+function frame(now) {
+    let dt = (now - lastT) / 1000;
+    lastT = now;
+    if (dt > 0.05) dt = 0.05;
+
+    applyPlayerInput();
+    world.update(dt);
+    camera.update();
+    intrinsic.render();
+    extrinsic.render();
+
+    requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

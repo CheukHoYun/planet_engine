@@ -1,0 +1,16 @@
+# IDE / editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local instructions / scratch
+CLAUDE.md
+.claude/
+
+# Node (unused but harmless)
+node_modules/
