@@ -124,7 +124,7 @@ import * as THREE from 'three';
 const R = 500.0;
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 25.0;            // m/s
-const GRID_N = 121;                  // ground patch resolution (doc spec is 201)
+const GRID_N = 120;                  // even, so no vertex sits at exactly (0,0) — avoids singularity in the geodesic projection
 const GRID_HALF_EXTENT = 0.3;        // angular half-extent in radians (~150m at R=500)
 const PLAYER_COLOR = 0xff5e8a;
 const SKY_COLOR = 0x6ca8d4;          // mid-blue, sky in intrinsic view
@@ -169,15 +169,20 @@ const world = {
     pitch: 0
 };
 
-// ===== Grid shader (shared between ground patch and extrinsic sphere) =====
-const GRID_VERTEX_SHADER = `
-    varying vec3 vWorldPos;
-    void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorldPos = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-    }
-`;
+// ===== Grid shaders =====
+//
+// Two vertex shaders, one fragment shader. The fragment uses the world-space
+// position of the vertex (the actual surface point) to compute lat/lon and
+// stripe the grid — same in both views.
+//
+// Vertex shader differs by view:
+//   EXTRINSIC: standard Euclidean projection (this view IS the embedding).
+//   INTRINSIC: geodesic projection — light follows great circles on the surface
+//              and moves linearly in height. A surface point at arc distance d
+//              and height difference Δh from the camera appears at local
+//              Euclidean position (d·sin β, Δh, d·cos β) where β is the bearing
+//              from player to point. Result: horizon is flat at every R, just
+//              as the inhabitant of S²×ℝ would see it.
 
 const GRID_FRAGMENT_SHADER = `
     precision highp float;
@@ -194,18 +199,83 @@ const GRID_FRAGMENT_SHADER = `
     }
 `;
 
-function gridShaderMaterial() {
+const EXTRINSIC_GRID_VERTEX_SHADER = `
+    varying vec3 vWorldPos;
+    void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+`;
+
+// Geodesic vertex projection. The camera lives at the origin of player-local
+// Euclidean space, with the only orientation being the pitch rotation (handled
+// by viewMatrix in JS). Yaw is encoded in uPlayerForward/uPlayerRight.
+const INTRINSIC_GRID_VERTEX_SHADER = `
+    uniform vec3 uPlayerRight;
+    uniform vec3 uPlayerForward;
+    uniform vec3 uPlayerUp;
+    uniform float uR;
+    uniform float uEyeHeight;
+    varying vec3 vWorldPos;
+    void main() {
+        vec4 wp4 = modelMatrix * vec4(position, 1.0);
+        vec3 wp = wp4.xyz;
+        vWorldPos = wp;
+
+        float worldLen = length(wp);
+        vec3 worldUnit = wp / worldLen;
+        float worldH = worldLen - uR;
+
+        float cosArc = clamp(dot(worldUnit, uPlayerUp), -1.0, 1.0);
+        float arc = uR * acos(cosArc);
+
+        vec3 tangent = worldUnit - cosArc * uPlayerUp;
+        float tlen = length(tangent);
+        // tlen ≈ 0 means the vertex is on (or antipodal to) the player's up axis.
+        // For the player-position vertex, fall back to a tiny forward offset so
+        // the perspective divide doesn't fire on z=0.
+        vec3 tangentDir = tlen > 1e-5 ? tangent / tlen : uPlayerForward;
+        float bRight = dot(tangentDir, uPlayerRight);
+        float bForward = dot(tangentDir, uPlayerForward);
+
+        float xLocal = arc * bRight;
+        float zLocal = arc * bForward;
+        float yLocal = worldH - uEyeHeight;
+
+        // Three.js camera looks down -Z, so map +zLocal (player's forward) to -Z.
+        vec4 localPos = vec4(xLocal, yLocal, -zLocal, 1.0);
+        gl_Position = projectionMatrix * viewMatrix * localPos;
+    }
+`;
+
+function extrinsicGridMaterial() {
     return new THREE.ShaderMaterial({
-        vertexShader: GRID_VERTEX_SHADER,
+        vertexShader: EXTRINSIC_GRID_VERTEX_SHADER,
         fragmentShader: GRID_FRAGMENT_SHADER,
         side: THREE.FrontSide
+    });
+}
+
+function intrinsicGridMaterial() {
+    return new THREE.ShaderMaterial({
+        vertexShader: INTRINSIC_GRID_VERTEX_SHADER,
+        fragmentShader: GRID_FRAGMENT_SHADER,
+        side: THREE.DoubleSide,  // viewing direction is now bearing-relative; be permissive
+        uniforms: {
+            uPlayerRight:   { value: new THREE.Vector3(1, 0, 0) },
+            uPlayerForward: { value: new THREE.Vector3(0, 1, 0) },
+            uPlayerUp:      { value: new THREE.Vector3(0, 0, 1) },
+            uR:             { value: R },
+            uEyeHeight:     { value: EYE_HEIGHT }
+        }
     });
 }
 
 // ===== Extrinsic full sphere =====
 function buildExtrinsicSphere(radius) {
     const geo = new THREE.SphereGeometry(radius, 96, 64);
-    const mat = gridShaderMaterial();
+    const mat = extrinsicGridMaterial();
     return new THREE.Mesh(geo, mat);
 }
 
@@ -233,7 +303,8 @@ function buildGroundPatch() {
     // Static large bounding sphere; the patch always contains the player
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), R * 2);
 
-    const mesh = new THREE.Mesh(geo, gridShaderMaterial());
+    const material = intrinsicGridMaterial();
+    const mesh = new THREE.Mesh(geo, material);
     mesh.frustumCulled = false;
 
     const tmp = new THREE.Vector3();
@@ -264,7 +335,7 @@ function buildGroundPatch() {
         posAttr.needsUpdate = true;
     }
 
-    return { mesh, regenerate };
+    return { mesh, material, regenerate };
 }
 
 // ===== Extrinsic view: scene, camera, renderer, inline orbit controls =====
@@ -395,24 +466,26 @@ function makeIntrinsicView(canvas) {
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
 
+    // Camera lives at the origin of player-local Euclidean space (the geodesic
+    // vertex shader does the world→local re-expression). Pitch is the only
+    // rotation. Yaw is encoded in the player frame's right/forward and shipped
+    // to the shader as uniforms.
     const camera = new THREE.PerspectiveCamera(70, 1, 0.1, R * 4);
+    camera.position.set(0, 0, 0);
+    camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    const lookTarget = new THREE.Vector3();
-    const lookDir = new THREE.Vector3();
+    function placeCamera(world) {
+        camera.rotation.set(world.pitch, 0, 0);
+    }
 
-    function placeCamera(frame, pitch) {
-        const up = frame.up();
-        const fwd = frame.forward();
-        camera.position.copy(up).multiplyScalar(R + EYE_HEIGHT);
-        camera.up.copy(up);
-        // lookDir = cos(pitch)*forward + sin(pitch)*up
-        lookDir.copy(fwd).multiplyScalar(Math.cos(pitch))
-               .addScaledVector(up, Math.sin(pitch));
-        lookTarget.copy(camera.position).add(lookDir);
-        camera.lookAt(lookTarget);
+    function updateGroundUniforms(world) {
+        const u = ground.material.uniforms;
+        u.uPlayerRight.value.copy(world.frame.right());
+        u.uPlayerForward.value.copy(world.frame.forward());
+        u.uPlayerUp.value.copy(world.frame.up());
     }
 
     function resize() {
@@ -426,7 +499,8 @@ function makeIntrinsicView(canvas) {
 
     function render(world) {
         ground.regenerate(world.frame, R);
-        placeCamera(world.frame, world.pitch);
+        updateGroundUniforms(world);
+        placeCamera(world);
         renderer.render(scene, camera);
     }
 
