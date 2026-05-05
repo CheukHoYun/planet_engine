@@ -98,9 +98,8 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <span>Markers: <span id="markerCount">0</span></span>
     <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
-    <span id="helpText">Click left to lock · WASD · Mouse to look · Space drops a marker · Drag right to orbit · Wheel to zoom</span>
+    <span id="helpText">Click left to lock · W/S walk · A/D turn · Mouse: orbit camera · Space: jump · Drag right to orbit · Wheel zoom</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -132,7 +131,10 @@ import * as THREE from 'three';
 let   R = 500.0;                     // mutable: the R slider rebinds it live
 const R_INITIAL = 500.0;             // the radius the extrinsic sphere geometry was built with
 const EYE_HEIGHT = 1.7;
-const WALK_SPEED = 25.0;            // m/s
+const WALK_SPEED = 100.0;            // m/s — a brisk run
+const TURN_SPEED = 2.6;              // rad/s — A/D
+const GRAVITY = 250.0;               // m/s²
+const JUMP_VEL = 110.0;              // m/s
 const GRID_N = 121;                  // ground patch resolution
 // Half-extent of the flat tangent-plane ground patch, in arc-meters. Large
 // enough that the patch boundary lands very close to the true horizon line
@@ -177,9 +179,17 @@ class Frame {
 }
 
 // ===== World state =====
+//   pitch:        camera elevation around the player (mouse-Y)
+//   cameraAzim:   camera horizontal angle around the player (mouse-X)
+//   h, vh:        player height and vertical velocity
+//   grounded:     standing on ground or platform
 const world = {
     frame: new Frame(),
-    pitch: 0
+    pitch: 0.20,
+    cameraAzim: 0,
+    h: 0,
+    vh: 0,
+    grounded: true
 };
 
 // ===== Entity helpers =====
@@ -708,32 +718,6 @@ function makeStripedPole(upWorld) {
     };
 }
 
-// Marker — a small colored cylinder, dropped by the player. The marker's
-// world position is captured at drop time and never moves.
-const MARKER_COLORS = [0xff5e8a, 0x4ce8a8, 0xe84c4c, 0xffd84a, 0xc084ff, 0x4ce884];
-
-function makeMarker(upWorld, color) {
-    const RAD = 2.5;
-    const HT = 12;
-    const geo = new THREE.CylinderGeometry(RAD, RAD, HT, 14);
-    const make = (mat) => {
-        const g = new THREE.Group();
-        const cyl = new THREE.Mesh(geo, mat);
-        cyl.position.y = HT / 2;
-        g.add(cyl);
-        return g;
-    };
-    const entityUniforms = createEntityUniforms();
-    return {
-        kind: 'marker',
-        intrinsicMesh: make(basicMaterial(color)),
-        extrinsicMesh: make(embeddingMaterial(color, entityUniforms)),
-        entityUniforms,
-        upWorld,
-        h: 0
-    };
-}
-
 function makePlatform(upWorld, h, width, depth, height) {
     const baseH = height * 0.82;
     const topH = height - baseH;
@@ -756,7 +740,9 @@ function makePlatform(upWorld, h, width, depth, height) {
         extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
         entityUniforms,
         upWorld,
-        h
+        h,
+        height,
+        footprintRadius: Math.max(width, depth) * 0.5  // for player landing CCD
     };
 }
 
@@ -880,6 +866,23 @@ function makeIntrinsicView(canvas) {
     const playerMesh = makePlayerMesh(basicMaterial);
     scene.add(playerMesh);
 
+    // Universal cover for the player. Unlike a normal entity (whose preimages
+    // lie along the unique great circle through both player and entity), the
+    // player is at distance 0 from themselves — every great circle through the
+    // player is "self-connecting", so preimages exist in every direction at
+    // every multiple of 2π·R. Sample 8 directions × a few wraps; this is the
+    // sphere analog of the 2D prototype's universal cover, where the loop ran
+    // over a discrete set of n. Pre-allocate, hide unused per frame.
+    const PLAYER_WRAP_DIRS = 8;     // ring resolution
+    const PLAYER_MAX_COPIES = 32;   // ~ 4 wraps × 8 directions
+    const playerCopies = [];
+    for (let i = 0; i < PLAYER_MAX_COPIES; i++) {
+        const c = makePlayerMesh(basicMaterial);
+        c.visible = false;
+        playerCopies.push(c);
+        scene.add(c);
+    }
+
     const camera = new THREE.PerspectiveCamera(70, 1, 0.1, GRID_HALF_ARC * 4);
     camera.rotation.order = 'YXZ';
 
@@ -887,25 +890,48 @@ function makeIntrinsicView(canvas) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(0x000000, 0);
 
-    // Third-person orbit: camera stays directly behind the player (in tangent
-    // space, that's +Z), at a fixed orbit radius around the player's center.
-    // Mouse-Y (pitch) elevates/lowers the camera.
+    // Third-person orbit. Mouse-X = world.cameraAzim (horizontal angle around
+    // the player). Mouse-Y = world.pitch (elevation). The camera tracks the
+    // player vertically as they jump.
     const PLAYER_CENTER_Y = PLAYER_H * 0.5;
     const ORBIT_RADIUS = 80;
-    const ORBIT_BASE_ANGLE = 0.20;  // ~11° default elevation, looking slightly down
 
     const _lookTarget = new THREE.Vector3();
 
     function placeCamera(world) {
-        const angle = ORBIT_BASE_ANGLE + world.pitch;
+        const elev = world.pitch;
+        const azim = world.cameraAzim;
+        const cosE = Math.cos(elev), sinE = Math.sin(elev);
+        const cosA = Math.cos(azim), sinA = Math.sin(azim);
+        const focusY = world.h + PLAYER_CENTER_Y;
         camera.position.set(
-            0,
-            PLAYER_CENTER_Y + ORBIT_RADIUS * Math.sin(angle),
-            ORBIT_RADIUS * Math.cos(angle)
+            ORBIT_RADIUS * cosE * sinA,
+            focusY + ORBIT_RADIUS * sinE,
+            ORBIT_RADIUS * cosE * cosA
         );
         camera.up.set(0, 1, 0);
-        _lookTarget.set(0, PLAYER_CENTER_Y, 0);
+        _lookTarget.set(0, focusY, 0);
         camera.lookAt(_lookTarget);
+    }
+
+    function updatePlayerWrapCopies() {
+        playerMesh.position.y = world.h;
+        const C = 2 * Math.PI * R;
+        const farLimit = camera.far;
+        let copyIdx = 0;
+        for (let n = 1; copyIdx < playerCopies.length; n++) {
+            const arc = n * C;
+            if (arc > farLimit) break;
+            for (let d = 0; d < PLAYER_WRAP_DIRS && copyIdx < playerCopies.length; d++) {
+                const theta = (d / PLAYER_WRAP_DIRS) * Math.PI * 2;
+                const c = playerCopies[copyIdx++];
+                c.visible = true;
+                c.position.set(arc * Math.sin(theta), world.h, arc * Math.cos(theta));
+            }
+        }
+        for (let i = copyIdx; i < playerCopies.length; i++) {
+            playerCopies[i].visible = false;
+        }
     }
 
     function updateGroundUniforms(world) {
@@ -926,6 +952,7 @@ function makeIntrinsicView(canvas) {
 
     function render(world) {
         updateGroundUniforms(world);
+        updatePlayerWrapCopies();
         placeCamera(world);
         renderer.render(scene, camera);
     }
@@ -983,25 +1010,26 @@ function addEntity(e) {
     extrinsicView.scene.add(e.extrinsicMesh);
 }
 
-// Walkers wander on great circles. Initial positions and speeds are arbitrary.
+// Walkers wander on great circles. Spread out compared to v0.x so the
+// player can roam without bumping into clusters.
 addEntity(makeWalker(
-    COLOR_WALKER_RED, 12,
-    arcUp(20, 40), projectForward(arcUp(20, 40), Y_AXIS)
+    COLOR_WALKER_RED, 35,
+    arcUp(80, 160), projectForward(arcUp(80, 160), Y_AXIS)
 ));
 addEntity(makeWalker(
-    COLOR_WALKER_GREEN, -8,
-    arcUp(50, -30), projectForward(arcUp(50, -30), X_AXIS)
+    COLOR_WALKER_GREEN, -28,
+    arcUp(180, -120), projectForward(arcUp(180, -120), X_AXIS)
 ));
 
 // Static landmarks
-addEntity(makeTree(arcUp(45, -55)));
-addEntity(makeSmiley(arcUp(95, 30), 180));
-addEntity(makeStripedPole(arcUp(15, 75)));
+addEntity(makeTree(arcUp(150, -200)));
+addEntity(makeSmiley(arcUp(320, 100), 180));
+addEntity(makeStripedPole(arcUp(60, 260)));
 
 // Platforms
-addEntity(makePlatform(arcUp(-20, 25), 0, 30, 30, 14));
-addEntity(makePlatform(arcUp(-35, -45), 0, 25, 40, 12));
-addEntity(makePlatform(arcUp(70, -10), 0, 22, 22, 18));
+addEntity(makePlatform(arcUp(-90, 110), 0, 50, 50, 22));
+addEntity(makePlatform(arcUp(-140, -180), 0, 40, 60, 18));
+addEntity(makePlatform(arcUp(240, -40), 0, 35, 35, 28));
 
 const _entityPos = new THREE.Vector3();
 
@@ -1122,17 +1150,22 @@ function updateEntities(dt) {
     }
 }
 
-// ===== Input: pointer lock on intrinsic canvas, keyboard, mouselook =====
+// ===== Input =====
+//
+// Mouse  — orbits the camera around the player (azimuth + elevation).
+//          The character's facing direction is independent; A/D turn it.
+// W/S    — walk forward/back along the character's facing direction.
+// A/D    — turn the character left/right.
+// Space  — jump (only when grounded).
 const keys = { w: false, a: false, s: false, d: false };
 let pointerLocked = false;
-let yawAccum = 0;
+let camAzimAccum = 0;
 let pitchAccum = 0;
-const MOUSE_SENSITIVITY = 0.002;
-// Third-person pitch range: total camera elevation = ORBIT_BASE_ANGLE (0.20) +
-// pitch. Wide range so the camera can swing from near-horizontal-with-the-player
-// up to nearly straight overhead.
-const PITCH_MIN = -0.30;
-const PITCH_MAX = 1.40;
+const MOUSE_SENSITIVITY = 0.003;
+// Camera elevation range — pitch IS the elevation (no offset). Lower bound
+// keeps the camera above the surface for any reasonable orbit radius.
+const PITCH_MIN = -0.18;
+const PITCH_MAX = 1.45;
 
 intrinsicCanvas.addEventListener('click', () => {
     if (!pointerLocked) intrinsicCanvas.requestPointerLock();
@@ -1142,20 +1175,9 @@ document.addEventListener('pointerlockchange', () => {
 });
 document.addEventListener('mousemove', (e) => {
     if (!pointerLocked) return;
-    yawAccum   += e.movementX * MOUSE_SENSITIVITY;
-    pitchAccum += e.movementY * MOUSE_SENSITIVITY;
+    camAzimAccum += e.movementX * MOUSE_SENSITIVITY;
+    pitchAccum   += e.movementY * MOUSE_SENSITIVITY;
 });
-
-const markerCountEl = document.getElementById('markerCount');
-let markerCount = 0;
-
-function dropMarker() {
-    const upClone = world.frame.up().clone();
-    const color = MARKER_COLORS[Math.floor(Math.random() * MARKER_COLORS.length)];
-    addEntity(makeMarker(upClone, color));
-    markerCount += 1;
-    markerCountEl.textContent = String(markerCount);
-}
 
 // ===== R slider =====
 const rSlider = document.getElementById('rSlider');
@@ -1201,7 +1223,10 @@ window.addEventListener('keydown', (e) => {
         return;
     }
     if ((k === ' ' || e.code === 'Space') && pointerLocked) {
-        dropMarker();
+        if (world.grounded) {
+            world.vh = JUMP_VEL;
+            world.grounded = false;
+        }
         e.preventDefault();
     }
 });
@@ -1213,28 +1238,80 @@ window.addEventListener('keyup', (e) => {
     }
 });
 
-function integrate(dt) {
-    // Yaw: rotate frame around its own up by -yawAccum (mouse-right -> look right)
-    if (yawAccum !== 0) {
-        world.frame.rotateAround(world.frame.up(), -yawAccum);
-        yawAccum = 0;
+function findHighestGroundUnder() {
+    const playerUp = world.frame.up();
+    let level = 0;  // ground at h=0 always
+    for (const e of entities) {
+        if (e.kind !== 'platform') continue;
+        const cosArc = Math.max(-1, Math.min(1, playerUp.dot(e.upWorld)));
+        const arc = R * Math.acos(cosArc);
+        if (arc > e.footprintRadius) continue;
+        const platTop = e.h + e.height;
+        // A platform supports the player if its top is at or below the
+        // player's current height (within tolerance).
+        if (platTop > level && platTop <= world.h + 0.02) {
+            level = platTop;
+        }
     }
-    // Pitch: scalar, camera-only, clamped. Convention: pitch > 0 = look down,
-    // matching the camera setup `rotation.x = -pitch`. Mouse-down (positive
-    // movementY) increases pitch.
+    return level;
+}
+
+function integrate(dt) {
+    // Camera azimuth (mouse-X): independent of player facing.
+    if (camAzimAccum !== 0) {
+        world.cameraAzim += camAzimAccum;
+        camAzimAccum = 0;
+    }
+    // Camera elevation (mouse-Y): clamped.
     if (pitchAccum !== 0) {
         world.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, world.pitch + pitchAccum));
         pitchAccum = 0;
     }
-    // Walk: rotate around right. -angle moves player toward +forward (premultiply convention)
+
+    // W/S — walk forward / back along player's facing.
     const walkSign = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
     if (walkSign !== 0) {
         world.frame.rotateAround(world.frame.right(), -walkSign * WALK_SPEED * dt / R);
     }
-    // Strafe: rotate around forward. +angle moves player toward +right (D)
-    const strafeSign = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
-    if (strafeSign !== 0) {
-        world.frame.rotateAround(world.frame.forward(), strafeSign * WALK_SPEED * dt / R);
+    // A/D — turn the character left / right (yaw the SO(3) frame around its own up axis).
+    const turnSign = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+    if (turnSign !== 0) {
+        world.frame.rotateAround(world.frame.up(), -turnSign * TURN_SPEED * dt);
+    }
+
+    // Vertical physics: gravity, ground/platform collision.
+    const support = findHighestGroundUnder();
+    if (world.grounded) {
+        if (Math.abs(world.h - support) < 0.5) {
+            world.h = support;  // stick to the surface
+        } else {
+            // The surface fell out from under us (walked off a platform).
+            world.grounded = false;
+        }
+    }
+    if (!world.grounded) {
+        const prevH = world.h;
+        world.vh -= GRAVITY * dt;
+        world.h += world.vh * dt;
+        // Find any surface we crossed this frame while falling (CCD).
+        let landAt = -Infinity;
+        if (prevH >= 0 && world.h <= 0 && world.vh <= 0) landAt = 0;
+        const playerUp = world.frame.up();
+        for (const e of entities) {
+            if (e.kind !== 'platform') continue;
+            const cosArc = Math.max(-1, Math.min(1, playerUp.dot(e.upWorld)));
+            const arc = R * Math.acos(cosArc);
+            if (arc > e.footprintRadius) continue;
+            const platTop = e.h + e.height;
+            if (prevH >= platTop - 0.01 && world.h <= platTop && world.vh <= 0) {
+                if (platTop > landAt) landAt = platTop;
+            }
+        }
+        if (landAt > -Infinity) {
+            world.h = landAt;
+            world.vh = 0;
+            world.grounded = true;
+        }
     }
 }
 
