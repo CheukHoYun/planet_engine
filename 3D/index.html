@@ -92,7 +92,8 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <span id="helpText">Click left to lock · WASD to move · Mouse to look · Drag right to orbit · Wheel to zoom · The world IS flat</span>
+    <span>Markers: <span id="markerCount">0</span></span>
+    <span id="helpText">Click left to lock · WASD · Mouse to look · Space drops a marker · Drag right to orbit · Wheel to zoom</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -596,6 +597,31 @@ function makeStripedPole(upWorld) {
     };
 }
 
+// Marker — a small colored cylinder, dropped by the player. The marker's
+// world position is captured at drop time and never moves.
+const MARKER_COLORS = [0xff5e8a, 0x4ce8a8, 0xe84c4c, 0xffd84a, 0xc084ff, 0x4ce884];
+
+function makeMarker(upWorld, color) {
+    const RAD = 2.5;
+    const HT = 12;
+    const geo = new THREE.CylinderGeometry(RAD, RAD, HT, 14);
+    const mat = new THREE.MeshBasicMaterial({ color });
+    const make = () => {
+        const g = new THREE.Group();
+        const cyl = new THREE.Mesh(geo, mat);
+        cyl.position.y = HT / 2;
+        g.add(cyl);
+        return g;
+    };
+    return {
+        kind: 'marker',
+        intrinsicMesh: make(),
+        extrinsicMesh: make(),
+        upWorld,
+        h: 0
+    };
+}
+
 function makePlatform(upWorld, h, width, depth, height) {
     const baseH = height * 0.82;
     const topH = height - baseH;
@@ -903,10 +929,26 @@ document.addEventListener('mousemove', (e) => {
     pitchAccum += e.movementY * MOUSE_SENSITIVITY;
 });
 
+const markerCountEl = document.getElementById('markerCount');
+let markerCount = 0;
+
+function dropMarker() {
+    const upClone = world.frame.up().clone();
+    const color = MARKER_COLORS[Math.floor(Math.random() * MARKER_COLORS.length)];
+    addEntity(makeMarker(upClone, color));
+    markerCount += 1;
+    markerCountEl.textContent = String(markerCount);
+}
+
 window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
         keys[k] = true;
+        e.preventDefault();
+        return;
+    }
+    if ((k === ' ' || e.code === 'Space') && pointerLocked) {
+        dropMarker();
         e.preventDefault();
     }
 });
