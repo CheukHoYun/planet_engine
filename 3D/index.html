@@ -92,7 +92,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <span id="helpText">Phase 1: extrinsic view only · Drag right view to orbit · Wheel to zoom</span>
+    <span id="helpText">Phase 2: ground patch · Drag right view to orbit · Wheel to zoom</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -123,7 +123,51 @@ import * as THREE from 'three';
 // ===== Constants =====
 const R = 500.0;
 const EYE_HEIGHT = 1.7;
+const WALK_SPEED = 25.0;            // m/s
+const GRID_N = 121;                  // ground patch resolution (doc spec is 201)
+const GRID_HALF_EXTENT = 0.3;        // angular half-extent in radians (~150m at R=500)
 const PLAYER_COLOR = 0xff5e8a;
+const SKY_COLOR = 0x6ca8d4;          // mid-blue, sky in intrinsic view
+
+// ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
+class Frame {
+    constructor() {
+        this.M = new THREE.Matrix4();
+        this._right = new THREE.Vector3();
+        this._forward = new THREE.Vector3();
+        this._up = new THREE.Vector3();
+        this._tmp = new THREE.Matrix4();
+        this._frameCount = 0;
+    }
+    right()   { return this._right.setFromMatrixColumn(this.M, 0); }
+    forward() { return this._forward.setFromMatrixColumn(this.M, 1); }
+    up()      { return this._up.setFromMatrixColumn(this.M, 2); }
+    rotateAround(axis, angle) {
+        if (angle === 0) return;
+        this._tmp.makeRotationAxis(axis, angle);
+        this.M.premultiply(this._tmp);
+    }
+    // Re-orthonormalize columns to fight float drift. Cheap; call ~once a second.
+    reorthogonalize() {
+        const e = this.M.elements;
+        const r = new THREE.Vector3(e[0], e[1], e[2]).normalize();
+        const f = new THREE.Vector3(e[4], e[5], e[6]);
+        f.addScaledVector(r, -r.dot(f)).normalize();
+        const u = new THREE.Vector3().crossVectors(r, f).normalize();
+        e[0] = r.x; e[1] = r.y; e[2] = r.z;
+        e[4] = f.x; e[5] = f.y; e[6] = f.z;
+        e[8] = u.x; e[9] = u.y; e[10] = u.z;
+    }
+    tick() {
+        if ((++this._frameCount % 60) === 0) this.reorthogonalize();
+    }
+}
+
+// ===== World state =====
+const world = {
+    frame: new Frame(),
+    pitch: 0
+};
 
 // ===== Grid shader (shared between ground patch and extrinsic sphere) =====
 const GRID_VERTEX_SHADER = `
@@ -163,6 +207,59 @@ function buildExtrinsicSphere(radius) {
     const geo = new THREE.SphereGeometry(radius, 96, 64);
     const mat = gridShaderMaterial();
     return new THREE.Mesh(geo, mat);
+}
+
+// ===== Ground patch: 121x121 grid centered on player, regenerated each frame =====
+function buildGroundPatch() {
+    const N = GRID_N;
+    const positions = new Float32Array(N * N * 3);
+    const indices = new Uint32Array((N - 1) * (N - 1) * 6);
+    let k = 0;
+    for (let j = 0; j < N - 1; j++) {
+        for (let i = 0; i < N - 1; i++) {
+            const a = j * N + i;
+            const b = a + 1;
+            const c = a + N;
+            const d = c + 1;
+            indices[k++] = a; indices[k++] = c; indices[k++] = b;
+            indices[k++] = b; indices[k++] = c; indices[k++] = d;
+        }
+    }
+    const geo = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(positions, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('position', posAttr);
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    // Static large bounding sphere; the patch always contains the player
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), R * 2);
+
+    const mesh = new THREE.Mesh(geo, gridShaderMaterial());
+    mesh.frustumCulled = false;
+
+    const tmp = new THREE.Vector3();
+
+    function regenerate(frame, radius) {
+        const right = frame.right().clone();
+        const up = frame.up().clone();
+        const arr = posAttr.array;
+        let idx = 0;
+        for (let j = 0; j < N; j++) {
+            const dLat = -GRID_HALF_EXTENT + (2 * GRID_HALF_EXTENT) * (j / (N - 1));
+            for (let i = 0; i < N; i++) {
+                const dLon = -GRID_HALF_EXTENT + (2 * GRID_HALF_EXTENT) * (i / (N - 1));
+                tmp.copy(up);
+                tmp.applyAxisAngle(right, dLat);
+                tmp.applyAxisAngle(up, dLon);
+                tmp.multiplyScalar(radius);
+                arr[idx++] = tmp.x;
+                arr[idx++] = tmp.y;
+                arr[idx++] = tmp.z;
+            }
+        }
+        posAttr.needsUpdate = true;
+    }
+
+    return { mesh, regenerate };
 }
 
 // ===== Extrinsic view: scene, camera, renderer, inline orbit controls =====
@@ -253,17 +350,33 @@ function makeExtrinsicView(canvas) {
     return { scene, camera, renderer, sphere, resize, render };
 }
 
-// ===== Intrinsic view (Phase 1: empty placeholder; Phase 2 fills in) =====
+// ===== Intrinsic view: first-person on the surface =====
 function makeIntrinsicView(canvas) {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a2a3a);
+    scene.background = new THREE.Color(SKY_COLOR);
+
+    const ground = buildGroundPatch();
+    scene.add(ground.mesh);
 
     const camera = new THREE.PerspectiveCamera(70, 1, 0.1, R * 4);
-    camera.position.set(0, R + EYE_HEIGHT, 0);
-    camera.lookAt(0, R + EYE_HEIGHT, 1);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const lookTarget = new THREE.Vector3();
+    const lookDir = new THREE.Vector3();
+
+    function placeCamera(frame, pitch) {
+        const up = frame.up();
+        const fwd = frame.forward();
+        camera.position.copy(up).multiplyScalar(R + EYE_HEIGHT);
+        camera.up.copy(up);
+        // lookDir = cos(pitch)*forward + sin(pitch)*up
+        lookDir.copy(fwd).multiplyScalar(Math.cos(pitch))
+               .addScaledVector(up, Math.sin(pitch));
+        lookTarget.copy(camera.position).add(lookDir);
+        camera.lookAt(lookTarget);
+    }
 
     function resize() {
         const w = canvas.clientWidth;
@@ -274,11 +387,13 @@ function makeIntrinsicView(canvas) {
         camera.updateProjectionMatrix();
     }
 
-    function render() {
+    function render(world) {
+        ground.regenerate(world.frame, R);
+        placeCamera(world.frame, world.pitch);
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, resize, render };
+    return { scene, camera, renderer, ground, resize, render };
 }
 
 // ===== Bootstrap =====
@@ -309,12 +424,13 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 // ===== Frame loop =====
-function frame() {
-    intrinsicView.render();
+function loop() {
+    world.frame.tick();
+    intrinsicView.render(world);
     extrinsicView.render();
-    requestAnimationFrame(frame);
+    requestAnimationFrame(loop);
 }
-requestAnimationFrame(frame);
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
