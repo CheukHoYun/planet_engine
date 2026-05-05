@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S² × ℝ Engine — 3D Prototype</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #111;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
+    }
+    body {
+        display: flex;
+        flex-direction: column;
+    }
+    #controls {
+        flex: 0 0 auto;
+        padding: 8px 12px;
+        background: #1c1c1c;
+        border-bottom: 1px solid #333;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 13px;
+    }
+    #controls label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    #controls input[type=range] {
+        width: 200px;
+    }
+    #panels {
+        flex: 1 1 auto;
+        display: flex;
+        min-height: 0;
+    }
+    .panel {
+        flex: 1 1 50%;
+        position: relative;
+        border-left: 1px solid #333;
+    }
+    .panel:first-child {
+        border-left: none;
+    }
+    canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+    #footer {
+        flex: 0 0 auto;
+        padding: 6px 12px;
+        background: #1c1c1c;
+        border-top: 1px solid #333;
+        font-size: 12px;
+        color: #aaa;
+    }
+    #fullscreenBtn {
+        position: fixed;
+        right: 10px;
+        bottom: 10px;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.05);
+        color: rgba(255, 255, 255, 0.4);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s ease, color 0.15s ease;
+        z-index: 10;
+    }
+    #fullscreenBtn:hover {
+        background: rgba(255, 255, 255, 0.18);
+        color: rgba(255, 255, 255, 0.95);
+    }
+    #fullscreenBtn svg {
+        width: 16px;
+        height: 16px;
+    }
+</style>
+</head>
+<body>
+<div id="controls">
+    <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
+    <span id="helpText">Phase 1: extrinsic view only · Drag right view to orbit · Wheel to zoom</span>
+</div>
+<div id="panels">
+    <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
+    <div class="panel"><canvas id="extrinsicCanvas"></canvas></div>
+</div>
+<div id="footer">Left: intrinsic (the world). Right: extrinsic (Euclidean embedding).</div>
+<button id="fullscreenBtn" title="Fullscreen" aria-label="Toggle fullscreen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 9V4h5"/><path d="M20 9V4h-5"/>
+        <path d="M4 15v5h5"/><path d="M20 15v5h-5"/>
+    </svg>
+</button>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+}
+</script>
+
+<script type="module">
+'use strict';
+
+import * as THREE from 'three';
+
+// ===== Constants =====
+const R = 500.0;
+const EYE_HEIGHT = 1.7;
+const PLAYER_COLOR = 0xff5e8a;
+
+// ===== Grid shader (shared between ground patch and extrinsic sphere) =====
+const GRID_VERTEX_SHADER = `
+    varying vec3 vWorldPos;
+    void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+`;
+
+const GRID_FRAGMENT_SHADER = `
+    precision highp float;
+    varying vec3 vWorldPos;
+    void main() {
+        vec3 n = normalize(vWorldPos);
+        float phi = asin(clamp(n.y, -1.0, 1.0));
+        float theta = atan(n.z, n.x);
+        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
+        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        float grid = max(gridLat, gridLon);
+        vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
+        gl_FragColor = vec4(color, 1.0);
+    }
+`;
+
+function gridShaderMaterial() {
+    return new THREE.ShaderMaterial({
+        vertexShader: GRID_VERTEX_SHADER,
+        fragmentShader: GRID_FRAGMENT_SHADER,
+        side: THREE.FrontSide
+    });
+}
+
+// ===== Extrinsic full sphere =====
+function buildExtrinsicSphere(radius) {
+    const geo = new THREE.SphereGeometry(radius, 96, 64);
+    const mat = gridShaderMaterial();
+    return new THREE.Mesh(geo, mat);
+}
+
+// ===== Extrinsic view: scene, camera, renderer, inline orbit controls =====
+function makeExtrinsicView(canvas) {
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a10);
+
+    const sphere = buildExtrinsicSphere(R);
+    scene.add(sphere);
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    // Orbit state
+    const orbit = {
+        azimuth: 0.6,
+        elevation: 0.4,
+        radius: R * 2.5,
+        dragging: false,
+        lastX: 0,
+        lastY: 0
+    };
+
+    function applyOrbit() {
+        const ce = Math.cos(orbit.elevation);
+        const se = Math.sin(orbit.elevation);
+        const ca = Math.cos(orbit.azimuth);
+        const sa = Math.sin(orbit.azimuth);
+        camera.position.set(
+            orbit.radius * ce * sa,
+            orbit.radius * se,
+            orbit.radius * ce * ca
+        );
+        camera.lookAt(0, 0, 0);
+    }
+    applyOrbit();
+
+    canvas.style.cursor = 'grab';
+    canvas.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        orbit.dragging = true;
+        orbit.lastX = e.clientX;
+        orbit.lastY = e.clientY;
+        canvas.setPointerCapture(e.pointerId);
+        canvas.style.cursor = 'grabbing';
+    });
+    canvas.addEventListener('pointermove', (e) => {
+        if (!orbit.dragging) return;
+        const dx = e.clientX - orbit.lastX;
+        const dy = e.clientY - orbit.lastY;
+        orbit.lastX = e.clientX;
+        orbit.lastY = e.clientY;
+        orbit.azimuth -= dx * 0.005;
+        orbit.elevation = Math.max(-1.4, Math.min(1.4, orbit.elevation + dy * 0.005));
+        applyOrbit();
+    });
+    function endDrag(e) {
+        if (!orbit.dragging) return;
+        orbit.dragging = false;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        canvas.style.cursor = 'grab';
+    }
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = Math.exp(e.deltaY * 0.0012);
+        orbit.radius = Math.max(R * 1.1, Math.min(R * 20, orbit.radius * factor));
+        applyOrbit();
+    }, { passive: false });
+
+    function resize() {
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        if (w === 0 || h === 0) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+    }
+
+    function render() {
+        renderer.render(scene, camera);
+    }
+
+    return { scene, camera, renderer, sphere, resize, render };
+}
+
+// ===== Intrinsic view (Phase 1: empty placeholder; Phase 2 fills in) =====
+function makeIntrinsicView(canvas) {
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a2a3a);
+
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, R * 4);
+    camera.position.set(0, R + EYE_HEIGHT, 0);
+    camera.lookAt(0, R + EYE_HEIGHT, 1);
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    function resize() {
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        if (w === 0 || h === 0) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+    }
+
+    function render() {
+        renderer.render(scene, camera);
+    }
+
+    return { scene, camera, renderer, resize, render };
+}
+
+// ===== Bootstrap =====
+const intrinsicCanvas = document.getElementById('intrinsicCanvas');
+const extrinsicCanvas = document.getElementById('extrinsicCanvas');
+
+const intrinsicView = makeIntrinsicView(intrinsicCanvas);
+const extrinsicView = makeExtrinsicView(extrinsicCanvas);
+
+function resizeAll() {
+    intrinsicView.resize();
+    extrinsicView.resize();
+}
+window.addEventListener('resize', resizeAll);
+resizeAll();
+
+// ===== Fullscreen button =====
+document.getElementById('fullscreenBtn').addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+        document.exitFullscreen().catch(() => {});
+    }
+});
+document.addEventListener('fullscreenchange', () => {
+    // Resize fires after layout settles
+    setTimeout(resizeAll, 0);
+});
+
+// ===== Frame loop =====
+function frame() {
+    intrinsicView.render();
+    extrinsicView.render();
+    requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
