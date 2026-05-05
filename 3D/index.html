@@ -238,8 +238,13 @@ function buildGroundPatch() {
 
     const tmp = new THREE.Vector3();
 
+    // Tangent-square patch: tilt the up vector independently around `right` and
+    // `forward`. (The literal doc spec rotates around `up` for the lon offset,
+    // which produces a polar parameterization with a degenerate point at the
+    // player and a fan-shape that's far too narrow for a first-person view.)
     function regenerate(frame, radius) {
         const right = frame.right().clone();
+        const forward = frame.forward().clone();
         const up = frame.up().clone();
         const arr = posAttr.array;
         let idx = 0;
@@ -248,8 +253,8 @@ function buildGroundPatch() {
             for (let i = 0; i < N; i++) {
                 const dLon = -GRID_HALF_EXTENT + (2 * GRID_HALF_EXTENT) * (i / (N - 1));
                 tmp.copy(up);
-                tmp.applyAxisAngle(right, dLat);
-                tmp.applyAxisAngle(up, dLon);
+                tmp.applyAxisAngle(right, dLat);     // forward/backward tilt
+                tmp.applyAxisAngle(forward, dLon);    // left/right tilt
                 tmp.multiplyScalar(radius);
                 arr[idx++] = tmp.x;
                 arr[idx++] = tmp.y;
