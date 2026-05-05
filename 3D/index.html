@@ -92,7 +92,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <span id="helpText">Phase 2: ground patch · Drag right view to orbit · Wheel to zoom</span>
+    <span id="helpText">Click left to lock · WASD to move · Mouse to look · Drag right to orbit · Wheel to zoom</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -270,6 +270,20 @@ function makeExtrinsicView(canvas) {
     const sphere = buildExtrinsicSphere(R);
     scene.add(sphere);
 
+    // Player marker — small pink sphere riding on the surface
+    const playerMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(R * 0.012, 16, 12),
+        new THREE.MeshBasicMaterial({ color: PLAYER_COLOR })
+    );
+    scene.add(playerMarker);
+
+    // Forward indicator — thin cylinder sticking out radially from the player marker
+    const fwdIndicator = new THREE.Mesh(
+        new THREE.CylinderGeometry(R * 0.003, R * 0.003, R * 0.04, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+    );
+    scene.add(fwdIndicator);
+
     const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -343,11 +357,29 @@ function makeExtrinsicView(canvas) {
         camera.updateProjectionMatrix();
     }
 
-    function render() {
+    const _markerPos = new THREE.Vector3();
+    const _fwdTip = new THREE.Vector3();
+    const Y_AXIS = new THREE.Vector3(0, 1, 0);
+    const _q = new THREE.Quaternion();
+
+    function render(world) {
+        if (world) {
+            const up = world.frame.up();
+            const fwd = world.frame.forward();
+            // Marker sits a hair above the surface to avoid z-fight
+            _markerPos.copy(up).multiplyScalar(R * 1.005);
+            playerMarker.position.copy(_markerPos);
+            // Forward indicator: cylinder centered slightly along the forward direction,
+            // oriented so its local +Y points along world forward
+            _fwdTip.copy(_markerPos).addScaledVector(fwd, R * 0.022);
+            fwdIndicator.position.copy(_fwdTip);
+            _q.setFromUnitVectors(Y_AXIS, fwd);
+            fwdIndicator.quaternion.copy(_q);
+        }
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, sphere, resize, render };
+    return { scene, camera, renderer, sphere, playerMarker, resize, render };
 }
 
 // ===== Intrinsic view: first-person on the surface =====
@@ -410,6 +442,64 @@ function resizeAll() {
 window.addEventListener('resize', resizeAll);
 resizeAll();
 
+// ===== Input: pointer lock on intrinsic canvas, keyboard, mouselook =====
+const keys = { w: false, a: false, s: false, d: false };
+let pointerLocked = false;
+let yawAccum = 0;
+let pitchAccum = 0;
+const MOUSE_SENSITIVITY = 0.002;
+const PITCH_LIMIT = 1.483;  // ~85°
+
+intrinsicCanvas.addEventListener('click', () => {
+    if (!pointerLocked) intrinsicCanvas.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', () => {
+    pointerLocked = document.pointerLockElement === intrinsicCanvas;
+});
+document.addEventListener('mousemove', (e) => {
+    if (!pointerLocked) return;
+    yawAccum   += e.movementX * MOUSE_SENSITIVITY;
+    pitchAccum += e.movementY * MOUSE_SENSITIVITY;
+});
+
+window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
+        keys[k] = true;
+        e.preventDefault();
+    }
+});
+window.addEventListener('keyup', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
+        keys[k] = false;
+        e.preventDefault();
+    }
+});
+
+function integrate(dt) {
+    // Yaw: rotate frame around its own up by -yawAccum (mouse-right -> look right)
+    if (yawAccum !== 0) {
+        world.frame.rotateAround(world.frame.up(), -yawAccum);
+        yawAccum = 0;
+    }
+    // Pitch: scalar, camera-only, clamped
+    if (pitchAccum !== 0) {
+        world.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, world.pitch - pitchAccum));
+        pitchAccum = 0;
+    }
+    // Walk: rotate around right. -angle moves player toward +forward (premultiply convention)
+    const walkSign = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+    if (walkSign !== 0) {
+        world.frame.rotateAround(world.frame.right(), -walkSign * WALK_SPEED * dt / R);
+    }
+    // Strafe: rotate around forward. +angle moves player toward +right (D)
+    const strafeSign = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+    if (strafeSign !== 0) {
+        world.frame.rotateAround(world.frame.forward(), strafeSign * WALK_SPEED * dt / R);
+    }
+}
+
 // ===== Fullscreen button =====
 document.getElementById('fullscreenBtn').addEventListener('click', () => {
     if (!document.fullscreenElement) {
@@ -424,10 +514,16 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 // ===== Frame loop =====
-function loop() {
+let lastTime = performance.now();
+function loop(now) {
+    if (now === undefined) now = performance.now();
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.05) dt = 0.05;  // clamp on tab-switch / first frame
+    integrate(dt);
     world.frame.tick();
     intrinsicView.render(world);
-    extrinsicView.render();
+    extrinsicView.render(world);
     requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
