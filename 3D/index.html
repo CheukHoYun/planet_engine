@@ -951,6 +951,12 @@ resizeAll();
 const entities = [];
 const walkers = [];
 
+// Maximum number of preimages of an entity rendered per frame (universal
+// cover). For R = 100 (smallest) and far = 12000 the geodesic enumeration
+// admits up to ~2 × 12000 / (2π·100) ≈ 38 preimages. 40 covers it; for
+// larger R most are clipped by the camera far plane and stay hidden.
+const MAX_PREIMAGES = 40;
+
 function addEntity(e) {
     entities.push(e);
     if (e.kind === 'walker') {
@@ -958,7 +964,22 @@ function addEntity(e) {
     } else {
         e.staticFrame = computeStaticMeshFrame(e.upWorld);
     }
+    // Universal cover. Light from the entity reaches the player along
+    // every great circle through it: the primary geodesic, the antipodal
+    // (long-way-around), and then wraps of both. Each path is a real
+    // geodesic in S²×ℝ, so the entity legitimately appears at every
+    // preimage tangent-plane position. We pre-allocate clones and toggle
+    // visibility per frame based on which preimages fall in the camera's
+    // far plane — same algorithm as the 2D prototype's intrinsic
+    // renderer at index.html:364-392, extended from 1D bearings to 2D.
+    e.intrinsicCopies = [e.intrinsicMesh];
     intrinsicView.scene.add(e.intrinsicMesh);
+    for (let i = 1; i < MAX_PREIMAGES; i++) {
+        const clone = e.intrinsicMesh.clone(true);
+        clone.visible = false;
+        e.intrinsicCopies.push(clone);
+        intrinsicView.scene.add(clone);
+    }
     extrinsicView.scene.add(e.extrinsicMesh);
 }
 
@@ -1006,6 +1027,8 @@ function updateEntities(dt) {
     const pR = world.frame.right();
     const pU = world.frame.up();
     const pF = world.frame.forward();
+    const C = 2 * Math.PI * R;                     // circumference of a great circle
+    const farLimit = intrinsicView.camera.far;     // beyond this the preimage is clipped
 
     for (const e of entities) {
         const isWalker = (e.kind === 'walker');
@@ -1021,24 +1044,72 @@ function updateEntities(dt) {
             _eF.copy(e.staticFrame.forward);
         }
 
-        // Intrinsic: project the entity's surface point to the player's
-        // tangent frame.
-        projectToTangent(_eU, e.h, world.frame, _entityPos);
-        e.intrinsicMesh.position.copy(_entityPos);
-
-        // Apparent rotation in tangent space: express the entity's world
-        // axes in the player's tangent basis. As the player walks around the
-        // entity, the entity's mesh rotates accordingly so different sides
-        // come into view.
-        //   mesh +X → entity.right (in tangent)
-        //   mesh +Y → entity.up    (in tangent)
-        //   mesh +Z → -entity.forward (in tangent) — mesh +Z is the back face
-        // Tangent convention: +X = pR, +Y = pU, +Z = -pF (Three.js).
-        _entXt.set(_eR.dot(pR), _eR.dot(pU), -_eR.dot(pF));
-        _entYt.set(_eU.dot(pR), _eU.dot(pU), -_eU.dot(pF));
-        _entZt.set(-_eF.dot(pR), -_eF.dot(pU), _eF.dot(pF));
+        // Yaw-only orientation. In S²×ℝ the height axis is independent of
+        // the surface (the metric has no (R+h)² term — §8 of the spec), so
+        // every entity stands vertically along the SAME global "up" in the
+        // inhabitant's tangent plane. Mesh +Y is always (0, 1, 0).
+        // Only the yaw varies with player position: the entity's world
+        // forward projected onto the player's tangent horizontal plane.
+        const fx = _eF.dot(pR);
+        const fz = -_eF.dot(pF);
+        const fLen = Math.sqrt(fx * fx + fz * fz);
+        if (fLen > 1e-6) {
+            const nx = fx / fLen;
+            const nz = fz / fLen;
+            _entZt.set(-nx, 0, -nz);
+            _entXt.crossVectors(Y_AXIS, _entZt).normalize();
+            _entYt.set(0, 1, 0);
+        } else {
+            _entXt.set(1, 0, 0);
+            _entYt.set(0, 1, 0);
+            _entZt.set(0, 0, 1);
+        }
         _entMat.makeBasis(_entXt, _entYt, _entZt);
-        e.intrinsicMesh.quaternion.setFromRotationMatrix(_entMat);
+
+        // Intrinsic: project the entity's surface point to the player's
+        // tangent frame, then enumerate preimages of the entity along every
+        // great circle through it. Each is a real geodesic image, not a copy.
+        projectToTangent(_eU, e.h, world.frame, _entityPos);
+        const xL = _entityPos.x;
+        const yL = _entityPos.y;
+        const zL = _entityPos.z;
+        const s = Math.sqrt(xL * xL + zL * zL);
+
+        let copyIdx = 0;
+        if (s < 1e-3) {
+            // Player is at the entity's surface position — only one preimage
+            // is well-defined (the entity's own location).
+            const c = e.intrinsicCopies[0];
+            c.visible = true;
+            c.position.set(0, yL, 0);
+            c.quaternion.setFromRotationMatrix(_entMat);
+            copyIdx = 1;
+        } else {
+            // Forward wraps: arc = s + n·C, same bearing β.
+            for (let n = 0; copyIdx < MAX_PREIMAGES; n++) {
+                const arc = s + n * C;
+                if (arc > farLimit) break;
+                const scale = arc / s;
+                const c = e.intrinsicCopies[copyIdx++];
+                c.visible = true;
+                c.position.set(xL * scale, yL, zL * scale);
+                c.quaternion.setFromRotationMatrix(_entMat);
+            }
+            // Backward wraps: arc = (n+1)·C − s, bearing β + π (opposite direction).
+            for (let n = 0; copyIdx < MAX_PREIMAGES; n++) {
+                const arc = (n + 1) * C - s;
+                if (arc > farLimit) break;
+                const scale = arc / s;
+                const c = e.intrinsicCopies[copyIdx++];
+                c.visible = true;
+                c.position.set(-xL * scale, yL, -zL * scale);
+                c.quaternion.setFromRotationMatrix(_entMat);
+            }
+        }
+        // Hide any preimages from previous frames that aren't in range now.
+        for (let i = copyIdx; i < e.intrinsicCopies.length; i++) {
+            e.intrinsicCopies[i].visible = false;
+        }
 
         // Extrinsic: push uniforms; the embedding shader does the placement.
         // Convention: uMeshZ is the world direction that mesh +Z (the BACK
