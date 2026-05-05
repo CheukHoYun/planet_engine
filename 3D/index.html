@@ -92,7 +92,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <span id="helpText">Click left to lock · WASD to move · Mouse to look · Drag right to orbit · Wheel to zoom</span>
+    <span id="helpText">Click left to lock · WASD to move · Mouse to look · Drag right to orbit · Wheel to zoom · The world IS flat</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -124,8 +124,8 @@ import * as THREE from 'three';
 const R = 500.0;
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 25.0;            // m/s
-const GRID_N = 120;                  // even, so no vertex sits at exactly (0,0) — avoids singularity in the geodesic projection
-const GRID_HALF_EXTENT = 0.3;        // angular half-extent in radians (~150m at R=500)
+const GRID_N = 121;                  // ground patch resolution
+const GRID_HALF_ARC = 150.0;         // half-extent of the tangent-plane ground patch, in meters
 const PLAYER_COLOR = 0xff5e8a;
 const SKY_COLOR = 0x6ca8d4;          // mid-blue, sky in intrinsic view
 
@@ -171,20 +171,32 @@ const world = {
 
 // ===== Grid shaders =====
 //
-// Two vertex shaders, one fragment shader. The fragment uses the world-space
-// position of the vertex (the actual surface point) to compute lat/lon and
-// stripe the grid — same in both views.
+// EXTRINSIC view (right panel): a sphere of radius R rendered with standard
+// Three.js perspective. Fragment colors a lat/lon grid from the world-space
+// vertex direction.
 //
-// Vertex shader differs by view:
-//   EXTRINSIC: standard Euclidean projection (this view IS the embedding).
-//   INTRINSIC: geodesic projection — light follows great circles on the surface
-//              and moves linearly in height. A surface point at arc distance d
-//              and height difference Δh from the camera appears at local
-//              Euclidean position (d·sin β, Δh, d·cos β) where β is the bearing
-//              from player to point. Result: horizon is flat at every R, just
-//              as the inhabitant of S²×ℝ would see it.
+// INTRINSIC view (left panel): the ground IS a flat plane in the player's
+// tangent space. There is no sphere, no curve, no embedding — the geometry
+// is genuinely flat and rendered with a standard Three.js camera. The
+// curvature appears only in the texture: each fragment computes the
+// (θ, φ) it corresponds to on the manifold via the exponential map
+// (Rodrigues rotation of the player's up vector toward the bearing of the
+// fragment, by angle d/R), then stripes the grid from that.
+//
+// The horizon is flat because the geometry is flat. The curvature is
+// visible only as grid-line convergence near the poles.
 
-const GRID_FRAGMENT_SHADER = `
+// --- Extrinsic ---
+const EXTRINSIC_VERTEX_SHADER = `
+    varying vec3 vWorldPos;
+    void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+`;
+
+const EXTRINSIC_FRAGMENT_SHADER = `
     precision highp float;
     varying vec3 vWorldPos;
     void main() {
@@ -199,75 +211,75 @@ const GRID_FRAGMENT_SHADER = `
     }
 `;
 
-const EXTRINSIC_GRID_VERTEX_SHADER = `
-    varying vec3 vWorldPos;
+// --- Intrinsic ---
+// Trivial passthrough vertex shader. The mesh's vertex positions ARE the
+// player-local tangent-plane positions; standard Three.js perspective then
+// renders them correctly because the geometry is genuinely flat.
+const INTRINSIC_VERTEX_SHADER = `
+    varying vec3 vTangentPos;
     void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorldPos = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
+        vTangentPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
 `;
 
-// Geodesic vertex projection. The camera lives at the origin of player-local
-// Euclidean space, with the only orientation being the pitch rotation (handled
-// by viewMatrix in JS). Yaw is encoded in uPlayerForward/uPlayerRight.
-const INTRINSIC_GRID_VERTEX_SHADER = `
+// Fragment computes the exponential map: which point on the manifold does
+// this tangent-space fragment correspond to? Then derives (θ, φ) and stripes.
+const INTRINSIC_FRAGMENT_SHADER = `
+    precision highp float;
     uniform vec3 uPlayerRight;
     uniform vec3 uPlayerForward;
     uniform vec3 uPlayerUp;
     uniform float uR;
-    uniform float uEyeHeight;
-    varying vec3 vWorldPos;
+    varying vec3 vTangentPos;
     void main() {
-        vec4 wp4 = modelMatrix * vec4(position, 1.0);
-        vec3 wp = wp4.xyz;
-        vWorldPos = wp;
+        // vTangentPos is in the mesh's local frame: +X = right, +Y = up,
+        // +Z is behind the camera (Three.js convention). Recover signed
+        // forward arc.
+        float arcX = vTangentPos.x;
+        float arcZ = -vTangentPos.z;
+        float d = sqrt(arcX * arcX + arcZ * arcZ);
 
-        float worldLen = length(wp);
-        vec3 worldUnit = wp / worldLen;
-        float worldH = worldLen - uR;
+        vec3 hitPoint;
+        if (d < 1e-3) {
+            hitPoint = uPlayerUp;
+        } else {
+            float bearing = atan(arcX, arcZ);
+            vec3 tangentDir = sin(bearing) * uPlayerRight + cos(bearing) * uPlayerForward;
+            float angle = d / uR;
+            // Rodrigues: rotate uPlayerUp toward tangentDir by angle. Since
+            // uPlayerUp ⟂ tangentDir, this collapses to the simple form.
+            hitPoint = uPlayerUp * cos(angle) + tangentDir * sin(angle);
+        }
 
-        float cosArc = clamp(dot(worldUnit, uPlayerUp), -1.0, 1.0);
-        float arc = uR * acos(cosArc);
-
-        vec3 tangent = worldUnit - cosArc * uPlayerUp;
-        float tlen = length(tangent);
-        // tlen ≈ 0 means the vertex is on (or antipodal to) the player's up axis.
-        // For the player-position vertex, fall back to a tiny forward offset so
-        // the perspective divide doesn't fire on z=0.
-        vec3 tangentDir = tlen > 1e-5 ? tangent / tlen : uPlayerForward;
-        float bRight = dot(tangentDir, uPlayerRight);
-        float bForward = dot(tangentDir, uPlayerForward);
-
-        float xLocal = arc * bRight;
-        float zLocal = arc * bForward;
-        float yLocal = worldH - uEyeHeight;
-
-        // Three.js camera looks down -Z, so map +zLocal (player's forward) to -Z.
-        vec4 localPos = vec4(xLocal, yLocal, -zLocal, 1.0);
-        gl_Position = projectionMatrix * viewMatrix * localPos;
+        float phi = asin(clamp(hitPoint.y, -1.0, 1.0));
+        float theta = atan(hitPoint.z, hitPoint.x);
+        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
+        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        float grid = max(gridLat, gridLon);
+        vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
+        gl_FragColor = vec4(color, 1.0);
     }
 `;
 
 function extrinsicGridMaterial() {
     return new THREE.ShaderMaterial({
-        vertexShader: EXTRINSIC_GRID_VERTEX_SHADER,
-        fragmentShader: GRID_FRAGMENT_SHADER,
+        vertexShader: EXTRINSIC_VERTEX_SHADER,
+        fragmentShader: EXTRINSIC_FRAGMENT_SHADER,
         side: THREE.FrontSide
     });
 }
 
 function intrinsicGridMaterial() {
     return new THREE.ShaderMaterial({
-        vertexShader: INTRINSIC_GRID_VERTEX_SHADER,
-        fragmentShader: GRID_FRAGMENT_SHADER,
-        side: THREE.DoubleSide,  // viewing direction is now bearing-relative; be permissive
+        vertexShader: INTRINSIC_VERTEX_SHADER,
+        fragmentShader: INTRINSIC_FRAGMENT_SHADER,
+        side: THREE.FrontSide,
         uniforms: {
             uPlayerRight:   { value: new THREE.Vector3(1, 0, 0) },
             uPlayerForward: { value: new THREE.Vector3(0, 1, 0) },
             uPlayerUp:      { value: new THREE.Vector3(0, 0, 1) },
-            uR:             { value: R },
-            uEyeHeight:     { value: EYE_HEIGHT }
+            uR:             { value: R }
         }
     });
 }
@@ -279,11 +291,23 @@ function buildExtrinsicSphere(radius) {
     return new THREE.Mesh(geo, mat);
 }
 
-// ===== Ground patch: 121x121 grid centered on player, regenerated each frame =====
+// ===== Ground patch: a static flat plane in the player's tangent space.
+// Generated once at startup. The geometry never changes — the player frame
+// uniforms drive the shader, which is what makes the world appear to move.
 function buildGroundPatch() {
     const N = GRID_N;
     const positions = new Float32Array(N * N * 3);
     const indices = new Uint32Array((N - 1) * (N - 1) * 6);
+    let idx = 0;
+    for (let j = 0; j < N; j++) {
+        const arcZ = -GRID_HALF_ARC + (2 * GRID_HALF_ARC) * (j / (N - 1));
+        for (let i = 0; i < N; i++) {
+            const arcX = -GRID_HALF_ARC + (2 * GRID_HALF_ARC) * (i / (N - 1));
+            positions[idx++] = arcX;       // +X = right
+            positions[idx++] = 0;          // ground plane y=0; camera sits at y=EYE_HEIGHT
+            positions[idx++] = -arcZ;      // forward → -Z (Three.js convention)
+        }
+    }
     let k = 0;
     for (let j = 0; j < N - 1; j++) {
         for (let i = 0; i < N - 1; i++) {
@@ -296,46 +320,14 @@ function buildGroundPatch() {
         }
     }
     const geo = new THREE.BufferGeometry();
-    const posAttr = new THREE.BufferAttribute(positions, 3);
-    posAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute('position', posAttr);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
-    // Static large bounding sphere; the patch always contains the player
-    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), R * 2);
+    geo.computeBoundingSphere();
 
     const material = intrinsicGridMaterial();
     const mesh = new THREE.Mesh(geo, material);
-    mesh.frustumCulled = false;
 
-    const tmp = new THREE.Vector3();
-
-    // Tangent-square patch: tilt the up vector independently around `right` and
-    // `forward`. (The literal doc spec rotates around `up` for the lon offset,
-    // which produces a polar parameterization with a degenerate point at the
-    // player and a fan-shape that's far too narrow for a first-person view.)
-    function regenerate(frame, radius) {
-        const right = frame.right().clone();
-        const forward = frame.forward().clone();
-        const up = frame.up().clone();
-        const arr = posAttr.array;
-        let idx = 0;
-        for (let j = 0; j < N; j++) {
-            const dLat = -GRID_HALF_EXTENT + (2 * GRID_HALF_EXTENT) * (j / (N - 1));
-            for (let i = 0; i < N; i++) {
-                const dLon = -GRID_HALF_EXTENT + (2 * GRID_HALF_EXTENT) * (i / (N - 1));
-                tmp.copy(up);
-                tmp.applyAxisAngle(right, dLat);     // forward/backward tilt
-                tmp.applyAxisAngle(forward, dLon);    // left/right tilt
-                tmp.multiplyScalar(radius);
-                arr[idx++] = tmp.x;
-                arr[idx++] = tmp.y;
-                arr[idx++] = tmp.z;
-            }
-        }
-        posAttr.needsUpdate = true;
-    }
-
-    return { mesh, material, regenerate };
+    return { mesh, material };
 }
 
 // ===== Extrinsic view: scene, camera, renderer, inline orbit controls =====
@@ -458,7 +450,10 @@ function makeExtrinsicView(canvas) {
     return { scene, camera, renderer, sphere, playerMarker, resize, render };
 }
 
-// ===== Intrinsic view: first-person on the surface =====
+// ===== Intrinsic view: standard Three.js camera looking at a flat plane.
+// The world is genuinely flat from the inhabitant's POV; no spherical
+// geometry exists in this scene. Yaw is carried by the SO(3) frame uniforms
+// pushed to the ground shader; pitch is the only camera rotation.
 function makeIntrinsicView(canvas) {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(SKY_COLOR);
@@ -466,19 +461,15 @@ function makeIntrinsicView(canvas) {
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
 
-    // Camera lives at the origin of player-local Euclidean space (the geodesic
-    // vertex shader does the world→local re-expression). Pitch is the only
-    // rotation. Yaw is encoded in the player frame's right/forward and shipped
-    // to the shader as uniforms.
-    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, R * 4);
-    camera.position.set(0, 0, 0);
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, GRID_HALF_ARC * 4);
+    camera.position.set(0, EYE_HEIGHT, 0);
     camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     function placeCamera(world) {
-        camera.rotation.set(world.pitch, 0, 0);
+        camera.rotation.set(-world.pitch, 0, 0);
     }
 
     function updateGroundUniforms(world) {
@@ -486,6 +477,7 @@ function makeIntrinsicView(canvas) {
         u.uPlayerRight.value.copy(world.frame.right());
         u.uPlayerForward.value.copy(world.frame.forward());
         u.uPlayerUp.value.copy(world.frame.up());
+        u.uR.value = R;
     }
 
     function resize() {
@@ -498,7 +490,6 @@ function makeIntrinsicView(canvas) {
     }
 
     function render(world) {
-        ground.regenerate(world.frame, R);
         updateGroundUniforms(world);
         placeCamera(world);
         renderer.render(scene, camera);
@@ -562,9 +553,11 @@ function integrate(dt) {
         world.frame.rotateAround(world.frame.up(), -yawAccum);
         yawAccum = 0;
     }
-    // Pitch: scalar, camera-only, clamped
+    // Pitch: scalar, camera-only, clamped. Convention: pitch > 0 = look down,
+    // matching the camera setup `rotation.x = -pitch`. Mouse-down (positive
+    // movementY) increases pitch.
     if (pitchAccum !== 0) {
-        world.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, world.pitch - pitchAccum));
+        world.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, world.pitch + pitchAccum));
         pitchAccum = 0;
     }
     // Walk: rotate around right. -angle moves player toward +forward (premultiply convention)
