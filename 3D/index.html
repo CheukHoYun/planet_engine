@@ -315,8 +315,9 @@ function buildGroundPatch() {
             const b = a + 1;
             const c = a + N;
             const d = c + 1;
-            indices[k++] = a; indices[k++] = c; indices[k++] = b;
-            indices[k++] = b; indices[k++] = c; indices[k++] = d;
+            // CCW from above (camera looks down -Y onto ground at y=0).
+            indices[k++] = a; indices[k++] = b; indices[k++] = c;
+            indices[k++] = b; indices[k++] = d; indices[k++] = c;
         }
     }
     const geo = new THREE.BufferGeometry();
