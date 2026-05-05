@@ -169,6 +169,92 @@ const world = {
     pitch: 0
 };
 
+// ===== Entity helpers =====
+//
+// Each entity has a position on the manifold expressed as a unit vector
+// `upWorld` (the surface normal where the entity stands) plus a scalar `h`
+// (height above the surface). To render in the intrinsic view, project to
+// the player's tangent space; in the extrinsic view, place absolutely.
+
+const X_AXIS = new THREE.Vector3(1, 0, 0);
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
+// Projects an entity at (upWorld, h) into player-local tangent coords.
+// Writes (xLocal, h, zLocal) into `out` (Three.js convention: forward → -Z).
+const _pUp = new THREE.Vector3();
+const _pRight = new THREE.Vector3();
+const _pForward = new THREE.Vector3();
+const _pTangent = new THREE.Vector3();
+function projectToTangent(upWorld, h, frame, out) {
+    _pUp.copy(frame.up());
+    _pRight.copy(frame.right());
+    _pForward.copy(frame.forward());
+
+    const cosArc = Math.max(-1, Math.min(1, upWorld.dot(_pUp)));
+    const arc = R * Math.acos(cosArc);
+
+    _pTangent.copy(upWorld).addScaledVector(_pUp, -cosArc);
+    const tlen = _pTangent.length();
+    if (tlen < 1e-6) {
+        out.set(0, h, 0);
+        return out;
+    }
+    _pTangent.divideScalar(tlen);
+    const bRight = _pTangent.dot(_pRight);
+    const bForward = _pTangent.dot(_pForward);
+    out.set(arc * bRight, h, -arc * bForward);
+    return out;
+}
+
+// Build an SO(3) frame matrix from an up vector + a forward hint. The
+// forward vector is auto-projected onto the tangent plane.
+function setFrameFromUpForward(frame, up, forwardHint) {
+    const u = up.clone().normalize();
+    const f = forwardHint.clone();
+    f.addScaledVector(u, -u.dot(f)).normalize();
+    const r = new THREE.Vector3().crossVectors(f, u).normalize();
+    const e = frame.M.elements;
+    e[0] = r.x; e[1] = r.y; e[2] = r.z; e[3] = 0;
+    e[4] = f.x; e[5] = f.y; e[6] = f.z; e[7] = 0;
+    e[8] = u.x; e[9] = u.y; e[10] = u.z; e[11] = 0;
+    e[12] = 0;  e[13] = 0;  e[14] = 0;   e[15] = 1;
+}
+
+// Spawn-relative unit vector: a position offset by (forwardArc, rightArc)
+// arc-meters from the player's spawn (identity frame, up = +Z, forward = +Y,
+// right = +X). For initial entity placement only.
+function arcUp(forwardArc, rightArc) {
+    const v = new THREE.Vector3(0, 0, 1);
+    if (forwardArc !== 0) v.applyAxisAngle(X_AXIS, -forwardArc / R);
+    if (rightArc   !== 0) v.applyAxisAngle(Y_AXIS,  rightArc   / R);
+    return v;
+}
+
+// Project an arbitrary vector hint onto the tangent plane at `upWorld`.
+function projectForward(upWorld, hint) {
+    const f = hint.clone();
+    f.addScaledVector(upWorld, -upWorld.dot(f)).normalize();
+    return f;
+}
+
+// Place an entity's extrinsic mesh at (R+h)·upWorld with +Y aligned to upWorld.
+function placeExtrinsicMesh(mesh, upWorld, h) {
+    mesh.position.copy(upWorld).multiplyScalar(R + h);
+    mesh.quaternion.setFromUnitVectors(Y_AXIS, upWorld);
+}
+
+// Walker placement uses the full SO(3) frame so the cube faces its motion direction.
+const _exMat = new THREE.Matrix4();
+function placeExtrinsicMeshOriented(mesh, frame, h) {
+    const r = frame.right();
+    const u = frame.up();
+    const f = frame.forward();
+    _exMat.makeBasis(r, u, f);
+    mesh.quaternion.setFromRotationMatrix(_exMat);
+    mesh.position.copy(u).multiplyScalar(R + h);
+}
+
 // ===== Grid shaders =====
 //
 // EXTRINSIC view (right panel): a sphere of radius R rendered with standard
@@ -331,6 +417,213 @@ function buildGroundPatch() {
     return { mesh, material };
 }
 
+// ===== Entity factories =====
+//
+// Each factory returns
+//   { kind, intrinsicMesh, extrinsicMesh, upWorld, h, ... }
+// with the meshes always built so that local +Y is "up" and the group's
+// origin sits at the entity's base height. Walkers carry their own SO(3)
+// frame and read upWorld from it each frame instead.
+
+const COLOR_WALKER_RED   = 0xe84c4c;
+const COLOR_WALKER_GREEN = 0x4ce8a8;
+const COLOR_TRUNK        = 0x7a4a22;
+const COLOR_CANOPY       = 0x2f8a3f;
+const COLOR_CANOPY_LIGHT = 0x3fa64f;
+const COLOR_SMILEY       = 0xffd84a;
+const COLOR_SMILEY_DARK  = 0x222222;
+const COLOR_PLATFORM_BASE = 0x7a4a22;
+const COLOR_PLATFORM_TOP  = 0x3a8c3a;
+const POLE_COLORS = [
+    0xe84c4c, 0xf0f0f0, 0x4c8ae8, 0xf0f0f0, 0xe8c84c,
+    0xf0f0f0, 0x4ce884, 0xf0f0f0, 0xc084ff, 0xf0f0f0
+];
+
+// Walker — solid colored cube. Matches 2D exactly: no eyes or other features.
+function makeWalker(color, walkSpeed, upWorld, forwardHint) {
+    const W = 20;
+    const H = 24;
+    const geo = new THREE.BoxGeometry(W, H, W);
+    const mat = new THREE.MeshBasicMaterial({ color });
+
+    const make = () => {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(geo, mat);
+        body.position.y = H / 2;
+        g.add(body);
+        return g;
+    };
+
+    const frame = new Frame();
+    setFrameFromUpForward(frame, upWorld, forwardHint);
+
+    return {
+        kind: 'walker',
+        frame,
+        intrinsicMesh: make(),
+        extrinsicMesh: make(),
+        h: 0,
+        speed: walkSpeed,
+        size: W,
+        height: H
+    };
+}
+
+// Tree — matches the 2D prototype's three-circle canopy.
+//   trunk: 14×40, brown, sits on the ground
+//   main canopy: dark-green sphere, radius 28
+//   secondary 1: lighter-green, radius 18, slightly above and to the left
+//   secondary 2: lighter-green, radius 16, slightly above and to the right
+// 2D positions translated: 2D entity y=0 is top, y=120 is bottom, so
+// 2D y=40-from-top → 3D y=80-from-ground in a 120-tall entity.
+function makeTree(upWorld) {
+    const TRUNK_W = 14;
+    const TRUNK_H = 40;
+
+    const trunkGeo = new THREE.BoxGeometry(TRUNK_W, TRUNK_H, TRUNK_W);
+    const trunkMat = new THREE.MeshBasicMaterial({ color: COLOR_TRUNK });
+    const canopyMainGeo = new THREE.SphereGeometry(28, 24, 16);
+    const canopyMainMat = new THREE.MeshBasicMaterial({ color: COLOR_CANOPY });
+    const canopy2Geo = new THREE.SphereGeometry(18, 18, 14);
+    const canopy3Geo = new THREE.SphereGeometry(16, 18, 14);
+    const canopySecMat = new THREE.MeshBasicMaterial({ color: COLOR_CANOPY_LIGHT });
+
+    const make = () => {
+        const g = new THREE.Group();
+        const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+        trunk.position.y = TRUNK_H / 2;
+        g.add(trunk);
+        const canopy = new THREE.Mesh(canopyMainGeo, canopyMainMat);
+        canopy.position.y = 80;
+        g.add(canopy);
+        const canopy2 = new THREE.Mesh(canopy2Geo, canopySecMat);
+        canopy2.position.set(-10, 88, 0);
+        g.add(canopy2);
+        const canopy3 = new THREE.Mesh(canopy3Geo, canopySecMat);
+        canopy3.position.set(12, 84, 0);
+        g.add(canopy3);
+        return g;
+    };
+
+    return {
+        kind: 'tree',
+        intrinsicMesh: make(),
+        extrinsicMesh: make(),
+        upWorld,
+        h: 0
+    };
+}
+
+function makeSmiley(upWorld, h) {
+    const RR = 25;
+    const sphereGeo = new THREE.SphereGeometry(RR, 32, 24);
+    const sphereMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY });
+    const eyeGeo = new THREE.SphereGeometry(RR * 0.13, 12, 8);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY_DARK });
+    const mouthGeo = new THREE.TorusGeometry(RR * 0.45, RR * 0.06, 8, 24, Math.PI);
+    const mouthMat = new THREE.MeshBasicMaterial({ color: COLOR_SMILEY_DARK });
+
+    const make = () => {
+        const g = new THREE.Group();
+        g.add(new THREE.Mesh(sphereGeo, sphereMat));
+        // Eyes and mouth on the local -Z face so they face the player on spawn.
+        const z = -RR * 0.92;
+        for (const sx of [-1, 1]) {
+            const eye = new THREE.Mesh(eyeGeo, eyeMat);
+            eye.position.set(sx * RR * 0.32, RR * 0.20, z);
+            g.add(eye);
+        }
+        // TorusGeometry with arc=π is the upper half-ring (looks like a frown).
+        // Rotating by π around Z flips it to a smile (∪).
+        const mouth = new THREE.Mesh(mouthGeo, mouthMat);
+        mouth.position.set(0, -RR * 0.10, z * 0.97);
+        mouth.rotation.z = Math.PI;
+        g.add(mouth);
+        return g;
+    };
+
+    return {
+        kind: 'smiley',
+        intrinsicMesh: make(),
+        extrinsicMesh: make(),
+        upWorld,
+        h
+    };
+}
+
+function makeStripedPole(upWorld) {
+    const POLE_W = 12;
+    const TOTAL_H = 300;
+    const N_BANDS = POLE_COLORS.length;
+    const BAND_H = TOTAL_H / N_BANDS;
+    const bandGeo = new THREE.BoxGeometry(POLE_W, BAND_H, POLE_W);
+
+    const makeIntrinsic = () => {
+        const g = new THREE.Group();
+        for (let i = 0; i < N_BANDS; i++) {
+            const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
+            const band = new THREE.Mesh(bandGeo, mat);
+            band.position.y = i * BAND_H + BAND_H / 2;
+            g.add(band);
+        }
+        return g;
+    };
+
+    // Extrinsic version: each band's width scaled by (R + h_band) / R — the
+    // visible "trapezoid" effect of S²×ℝ's product metric. Same arc length is
+    // a wider Euclidean width when embedded at greater radius.
+    const makeExtrinsic = () => {
+        const g = new THREE.Group();
+        for (let i = 0; i < N_BANDS; i++) {
+            const mat = new THREE.MeshBasicMaterial({ color: POLE_COLORS[i] });
+            const band = new THREE.Mesh(bandGeo, mat);
+            const cy = i * BAND_H + BAND_H / 2;
+            band.position.y = cy;
+            const widen = (R + cy) / R;
+            band.scale.x = widen;
+            band.scale.z = widen;
+            g.add(band);
+        }
+        return g;
+    };
+
+    return {
+        kind: 'pole',
+        intrinsicMesh: makeIntrinsic(),
+        extrinsicMesh: makeExtrinsic(),
+        upWorld,
+        h: 0
+    };
+}
+
+function makePlatform(upWorld, h, width, depth, height) {
+    const baseH = height * 0.82;
+    const topH = height - baseH;
+    const baseGeo = new THREE.BoxGeometry(width, baseH, depth);
+    const topGeo = new THREE.BoxGeometry(width, topH, depth);
+    const baseMat = new THREE.MeshBasicMaterial({ color: COLOR_PLATFORM_BASE });
+    const topMat = new THREE.MeshBasicMaterial({ color: COLOR_PLATFORM_TOP });
+
+    const make = () => {
+        const g = new THREE.Group();
+        const base = new THREE.Mesh(baseGeo, baseMat);
+        base.position.y = baseH / 2;
+        g.add(base);
+        const top = new THREE.Mesh(topGeo, topMat);
+        top.position.y = baseH + topH / 2;
+        g.add(top);
+        return g;
+    };
+
+    return {
+        kind: 'platform',
+        intrinsicMesh: make(),
+        extrinsicMesh: make(),
+        upWorld,
+        h
+    };
+}
+
 // ===== Extrinsic view: scene, camera, renderer, inline orbit controls =====
 function makeExtrinsicView(canvas) {
     const scene = new THREE.Scene();
@@ -339,19 +632,44 @@ function makeExtrinsicView(canvas) {
     const sphere = buildExtrinsicSphere(R);
     scene.add(sphere);
 
-    // Player marker — small pink sphere riding on the surface
-    const playerMarker = new THREE.Mesh(
-        new THREE.SphereGeometry(R * 0.012, 16, 12),
-        new THREE.MeshBasicMaterial({ color: PLAYER_COLOR })
-    );
+    // Player marker — a pink cube with white eyes, dark pupils, and a thin
+    // dark-pink belt — matching the 2D player exactly. ~22×30×22 units.
+    const PLAYER_W = 22;
+    const PLAYER_H = 30;
+    const PLAYER_BELT_COLOR = 0x7a2848;
+    const playerMarker = new THREE.Group();
+    {
+        const body = new THREE.Mesh(
+            new THREE.BoxGeometry(PLAYER_W, PLAYER_H, PLAYER_W),
+            new THREE.MeshBasicMaterial({ color: PLAYER_COLOR })
+        );
+        body.position.y = PLAYER_H / 2;
+        playerMarker.add(body);
+        // Belt: thin dark-pink horizontal stripe at h*0.6 (matching 2D).
+        const beltH = 1.5;
+        const belt = new THREE.Mesh(
+            new THREE.BoxGeometry(PLAYER_W + 0.2, beltH, PLAYER_W + 0.2),
+            new THREE.MeshBasicMaterial({ color: PLAYER_BELT_COLOR })
+        );
+        belt.position.y = PLAYER_H * 0.6;
+        playerMarker.add(belt);
+        // Eyes: white rectangles 4×5, on the -Z (front) face.
+        const eyeGeo = new THREE.BoxGeometry(4, 5, 0.4);
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const pupilGeo = new THREE.BoxGeometry(2, 3, 0.2);
+        const pupilMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+        const eyeY = PLAYER_H * 0.75;
+        const eyeZ = -PLAYER_W / 2 - 0.1;
+        for (const sx of [-1, 1]) {
+            const eye = new THREE.Mesh(eyeGeo, eyeMat);
+            eye.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ);
+            playerMarker.add(eye);
+            const pupil = new THREE.Mesh(pupilGeo, pupilMat);
+            pupil.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ - 0.3);
+            playerMarker.add(pupil);
+        }
+    }
     scene.add(playerMarker);
-
-    // Forward indicator — thin cylinder sticking out radially from the player marker
-    const fwdIndicator = new THREE.Mesh(
-        new THREE.CylinderGeometry(R * 0.003, R * 0.003, R * 0.04, 8),
-        new THREE.MeshBasicMaterial({ color: 0xffffff })
-    );
-    scene.add(fwdIndicator);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
 
@@ -426,24 +744,19 @@ function makeExtrinsicView(canvas) {
         camera.updateProjectionMatrix();
     }
 
-    const _markerPos = new THREE.Vector3();
-    const _fwdTip = new THREE.Vector3();
-    const Y_AXIS = new THREE.Vector3(0, 1, 0);
-    const _q = new THREE.Quaternion();
+    const _markerMat = new THREE.Matrix4();
 
     function render(world) {
         if (world) {
-            const up = world.frame.up();
-            const fwd = world.frame.forward();
-            // Marker sits a hair above the surface to avoid z-fight
-            _markerPos.copy(up).multiplyScalar(R * 1.005);
-            playerMarker.position.copy(_markerPos);
-            // Forward indicator: cylinder centered slightly along the forward direction,
-            // oriented so its local +Y points along world forward
-            _fwdTip.copy(_markerPos).addScaledVector(fwd, R * 0.022);
-            fwdIndicator.position.copy(_fwdTip);
-            _q.setFromUnitVectors(Y_AXIS, fwd);
-            fwdIndicator.quaternion.copy(_q);
+            // Place the player marker as a proper basis-oriented cube on the
+            // sphere: +Y aligned to up_world, -Z (front of cube) aligned to
+            // walking forward direction.
+            const r = world.frame.right();
+            const u = world.frame.up();
+            const f = world.frame.forward();
+            _markerMat.makeBasis(r, u, f);
+            playerMarker.quaternion.setFromRotationMatrix(_markerMat);
+            playerMarker.position.copy(u).multiplyScalar(R);
         }
         renderer.render(scene, camera);
     }
@@ -512,6 +825,63 @@ function resizeAll() {
 }
 window.addEventListener('resize', resizeAll);
 resizeAll();
+
+// ===== Spawn entities =====
+const entities = [];
+const walkers = [];
+
+function addEntity(e) {
+    entities.push(e);
+    if (e.kind === 'walker') walkers.push(e);
+    intrinsicView.scene.add(e.intrinsicMesh);
+    extrinsicView.scene.add(e.extrinsicMesh);
+}
+
+// Walkers wander on great circles. Initial positions and speeds are arbitrary.
+addEntity(makeWalker(
+    COLOR_WALKER_RED, 12,
+    arcUp(20, 40), projectForward(arcUp(20, 40), Y_AXIS)
+));
+addEntity(makeWalker(
+    COLOR_WALKER_GREEN, -8,
+    arcUp(50, -30), projectForward(arcUp(50, -30), X_AXIS)
+));
+
+// Static landmarks
+addEntity(makeTree(arcUp(45, -55)));
+addEntity(makeSmiley(arcUp(95, 30), 180));
+addEntity(makeStripedPole(arcUp(15, 75)));
+
+// Platforms
+addEntity(makePlatform(arcUp(-20, 25), 0, 30, 30, 14));
+addEntity(makePlatform(arcUp(-35, -45), 0, 25, 40, 12));
+addEntity(makePlatform(arcUp(70, -10), 0, 22, 22, 18));
+
+const _entityPos = new THREE.Vector3();
+
+function updateEntities(dt) {
+    // Walkers walk along their own great circles. Walking forward = rotate
+    // their frame around right by -v·dt/R, same as the player.
+    for (const w of walkers) {
+        w.frame.rotateAround(w.frame.right(), -w.speed * dt / R);
+        if ((w._tickCount = (w._tickCount || 0) + 1) % 60 === 0) {
+            w.frame.reorthogonalize();
+        }
+    }
+    // Place each entity in both scenes.
+    for (const e of entities) {
+        const upW = (e.kind === 'walker') ? e.frame.up() : e.upWorld;
+        // Intrinsic: tangent-space projection. Local +Y of mesh stays vertical.
+        projectToTangent(upW, e.h, world.frame, _entityPos);
+        e.intrinsicMesh.position.copy(_entityPos);
+        // Extrinsic: absolute placement on the embedded sphere.
+        if (e.kind === 'walker') {
+            placeExtrinsicMeshOriented(e.extrinsicMesh, e.frame, e.h);
+        } else {
+            placeExtrinsicMesh(e.extrinsicMesh, e.upWorld, e.h);
+        }
+    }
+}
 
 // ===== Input: pointer lock on intrinsic canvas, keyboard, mouselook =====
 const keys = { w: false, a: false, s: false, d: false };
@@ -595,6 +965,7 @@ function loop(now) {
     if (dt > 0.05) dt = 0.05;  // clamp on tab-switch / first frame
     integrate(dt);
     world.frame.tick();
+    updateEntities(dt);
     intrinsicView.render(world);
     extrinsicView.render(world);
     requestAnimationFrame(loop);
