@@ -61,6 +61,32 @@
         font-size: 12px;
         color: #aaa;
     }
+    #fullscreenBtn {
+        position: fixed;
+        right: 10px;
+        bottom: 10px;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.05);
+        color: rgba(255, 255, 255, 0.4);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s ease, color 0.15s ease;
+        z-index: 10;
+    }
+    #fullscreenBtn:hover {
+        background: rgba(255, 255, 255, 0.18);
+        color: rgba(255, 255, 255, 0.95);
+    }
+    #fullscreenBtn svg {
+        width: 16px;
+        height: 16px;
+    }
 </style>
 </head>
 <body>
@@ -73,6 +99,13 @@
     <div class="panel"><canvas id="extrinsicCanvas"></canvas></div>
 </div>
 <div id="footer">Left: intrinsic (inhabitant view). Right: extrinsic (god view).</div>
+<button id="fullscreenBtn" title="Fullscreen" aria-label="Toggle fullscreen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 9V4h5"/><path d="M20 9V4h-5"/>
+        <path d="M4 15v5h5"/><path d="M20 15v5h-5"/>
+    </svg>
+</button>
 <script>
 'use strict';
 
@@ -885,6 +918,14 @@ extrinsicCanvas.addEventListener('wheel', (ev) => {
     extrinsicCanvas.addEventListener('pointerup', endDrag);
     extrinsicCanvas.addEventListener('pointercancel', endDrag);
 }
+
+document.getElementById('fullscreenBtn').addEventListener('click', () => {
+    if (document.fullscreenElement) {
+        document.exitFullscreen();
+    } else if (document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+    }
+});
 
 function resize() {
     for (const c of [intrinsicCanvas, extrinsicCanvas]) {
