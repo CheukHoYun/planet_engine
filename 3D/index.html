@@ -67,6 +67,19 @@
         font-size: 12px;
         color: #aaa;
     }
+    #controls button {
+        background: rgba(255,255,255,0.06);
+        color: #ccc;
+        border: 1px solid #444;
+        border-radius: 3px;
+        padding: 2px 8px;
+        font-size: 12px;
+        cursor: pointer;
+    }
+    #controls button:hover {
+        background: rgba(255,255,255,0.14);
+        color: #fff;
+    }
     #fullscreenBtn {
         position: fixed;
         right: 10px;
@@ -98,7 +111,9 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <label>View: <input id="farSlider" type="range" min="200" max="12000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
+    <label>View: <input id="farSlider" type="range" min="200" max="15000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
+    <button id="farHalfBtn" title="View distance = πR (one half-lap, the antipode)">½ lap</button>
+    <button id="farFullBtn" title="View distance = 2πR (one full lap, back to yourself)">1 lap</button>
     <label>Walker h: <input id="walkerHSlider" type="range" min="0" max="400" value="0" step="1" disabled><span id="walkerHValue">0</span></label>
     <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
     <span id="helpText">Click left to lock · WASD: move (camera-relative) · Mouse: orbit · Space: jump · Drag right to orbit · Middle-drag to pan · Wheel zoom</span>
@@ -149,11 +164,12 @@ const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2
 // plenty. 121×121 (~86k triangles) was wasted geometry.
 const GRID_N = 21;
 // Half-extent of the flat tangent-plane ground patch, in arc-meters. Sized
-// to match the MAX intrinsic camera far plane so the ground extends to the
-// horizon at any View-slider setting.
-const GRID_HALF_ARC = 12000.0;
-// Default far plane, halved from 12000 to keep startup perf reasonable.
-// Drag the View slider up if you want long-range wraps.
+// to fit "one full lap" at the largest R the slider allows
+// (2π × 2000 ≈ 12566 → round up to 15000 for headroom). The View slider's
+// max matches.
+const GRID_HALF_ARC = 15000.0;
+// Default far plane. Drag the View slider up (or click the lap buttons)
+// if you want long-range wraps.
 const DEFAULT_FAR   = 4000.0;
 const PLAYER_COLOR = 0xff5e8a;
 
@@ -1412,6 +1428,20 @@ function setIntrinsicFar(newFar) {
 farSlider.addEventListener('input', () => {
     setIntrinsicFar(parseFloat(farSlider.value));
 });
+
+// Quick-jump buttons: snap the View distance to half-lap (πR — antipode)
+// or full-lap (2πR — back to yourself). Compute against the current R so
+// the buttons retarget when R changes.
+function setFarToLaps(laps) {
+    const target = laps * 2 * Math.PI * R;
+    const min = parseFloat(farSlider.min);
+    const max = parseFloat(farSlider.max);
+    const clamped = Math.max(min, Math.min(max, target));
+    farSlider.value = String(clamped);
+    setIntrinsicFar(clamped);
+}
+document.getElementById('farHalfBtn').addEventListener('click', () => setFarToLaps(0.5));
+document.getElementById('farFullBtn').addEventListener('click', () => setFarToLaps(1.0));
 
 // Walker height slider — lifts the red and blue walkers above the surface.
 // They keep walking along their great circles; just at higher h.
