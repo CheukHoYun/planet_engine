@@ -395,8 +395,20 @@ const EXTRINSIC_EMBED_VERTEX_SHADER = `
 const EXTRINSIC_EMBED_FRAGMENT_SHADER = `
     precision highp float;
     uniform vec3 uColor;
+    // uColor arrives as LINEAR space (Three.js converts hex from sRGB → linear
+    // when constructing THREE.Color in r152+). The framebuffer expects sRGB,
+    // and stock materials would do this conversion via <colorspace_fragment>;
+    // since this is a custom shader we do it manually so the colors match
+    // the intrinsic side. Full piecewise sRGB transfer (not a 1/2.2 approx)
+    // for accuracy.
+    vec3 linearToSRGB(vec3 c) {
+        bvec3 cutoff = lessThan(c, vec3(0.0031308));
+        vec3 hi = pow(c, vec3(1.0 / 2.4)) * 1.055 - 0.055;
+        vec3 lo = c * 12.92;
+        return mix(hi, lo, vec3(cutoff));
+    }
     void main() {
-        gl_FragColor = vec4(uColor, 1.0);
+        gl_FragColor = vec4(linearToSRGB(uColor), 1.0);
     }
 `;
 
