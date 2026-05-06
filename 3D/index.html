@@ -1437,35 +1437,42 @@ function integrate(dt) {
     const moveX = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
     const moveZ = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
     if (moveX !== 0 || moveZ !== 0) {
-        // Make sure cameraSurfaceFrame is up-to-date for the just-updated
-        // cameraAzim/pitch before reading the camera's world axes.
-        updateCameraSurfaceFrame();
-        const camR = cameraSurfaceFrame.right();
-        const camF = cameraSurfaceFrame.forward();
-        // Tangent +X = camR; tangent forward (-Z) = camF, so moveZ = -1 (W) → +camF.
+        // The CAMERA's screen-aligned world axes (in the horizontal tangent
+        // plane), computed directly from cameraAzim and the player frame:
+        //   camFwd   = -sin(α)·right + cos(α)·forward     (camera looks at player)
+        //   camRight =  cos(α)·right + sin(α)·forward     (camFwd × up)
+        // These axes stay fixed in world while cameraAzim is compensated for
+        // the character's auto-turn, so WASD doesn't oscillate. (Using
+        // cameraSurfaceFrame.right here was wrong: that's the PLAYER's right
+        // parallel-transported, which rotates with the player frame and
+        // creates a feedback loop where pressing A makes the character chase
+        // its own rotating reference axis — the "spin like crazy" symptom.)
+        const cosAz = Math.cos(world.cameraAzim);
+        const sinAz = Math.sin(world.cameraAzim);
+        const pR = world.frame.right();
+        const pF = world.frame.forward();
+        const pU = world.frame.up().clone();
+        // camFwd · moveScalar(-moveZ) + camRight · moveScalar(moveX)
+        // expanded into player-frame contributions:
+        const rWeight = moveX * cosAz - (-moveZ) * sinAz;
+        const fWeight = moveX * sinAz + (-moveZ) * cosAz;
         _moveDirWorld.set(0, 0, 0)
-            .addScaledVector(camR,  moveX)
-            .addScaledVector(camF, -moveZ);
-        // Project onto the player's tangent plane (perpendicular to player.up).
-        const pUp = world.frame.up().clone();
-        _moveDirWorld.addScaledVector(pUp, -pUp.dot(_moveDirWorld));
+            .addScaledVector(pR, rWeight)
+            .addScaledVector(pF, fWeight);
+        _moveDirWorld.addScaledVector(pU, -pU.dot(_moveDirWorld));
         if (_moveDirWorld.lengthSq() > 1e-6) {
             _moveDirWorld.normalize();
-            // Capture old forward — we need to compensate cameraAzim by the
-            // exact angle the player rotates by, so the camera stays put in
-            // world coords (cameraAzim is player-frame-relative; without this
-            // the camera would follow the character's auto-turn).
             _oldFwd.copy(world.frame.forward());
-            // Snap the character to face the movement direction.
-            setFrameFromUpForward(world.frame, pUp, _moveDirWorld);
-            // Signed angle from oldForward to newForward around pUp.
+            setFrameFromUpForward(world.frame, pU, _moveDirWorld);
+            // Compensate cameraAzim so the camera's world bearing is unchanged
+            // by the character's snap-rotation. Signed angle (oldFwd → newFwd)
+            // around pU, decremented from cameraAzim.
             const newFwd = world.frame.forward();
             _crossTmp.crossVectors(_oldFwd, newFwd);
-            const sinA = _crossTmp.dot(pUp);
+            const sinA = _crossTmp.dot(pU);
             const cosA = _oldFwd.dot(newFwd);
-            const turnAngle = Math.atan2(sinA, cosA);
-            world.cameraAzim -= turnAngle;
-            // Walk forward (rotation around frame.right by -v·dt/R).
+            world.cameraAzim -= Math.atan2(sinA, cosA);
+            // Walk forward.
             world.frame.rotateAround(world.frame.right(), -WALK_SPEED * dt / R);
         }
     }
