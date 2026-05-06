@@ -5,124 +5,215 @@
 <title>S² × ℝ Engine — 3D Prototype</title>
 <style>
     html, body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        background: #111;
-        color: #eee;
-        font-family: system-ui, sans-serif;
+        margin: 0; padding: 0; height: 100%;
+        background: #050608; color: #e8eaef;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         overflow: hidden;
     }
-    body {
-        display: flex;
-        flex-direction: column;
+    body { display: flex; flex-direction: column; }
+    #panels { flex: 1 1 auto; display: flex; min-height: 0; }
+    .panel { flex: 1 1 50%; position: relative; border-left: 1px solid #1a1d23; }
+    .panel:first-child { border-left: none; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #intrinsicCanvas { background: linear-gradient(to bottom, #3a6ea5 0%, #9bc4e2 100%); }
+    #extrinsicCanvas { background: radial-gradient(circle at center, #0e1218 0%, #050608 90%); }
+
+    /* Floating glass panels embedded in each view. */
+    .hud {
+        position: absolute;
+        background: rgba(15, 18, 24, 0.62);
+        backdrop-filter: blur(16px) saturate(140%);
+        -webkit-backdrop-filter: blur(16px) saturate(140%);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 10px;
+        padding: 10px 14px;
+        color: #e8eaef;
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        user-select: none;
+        box-shadow: 0 6px 28px rgba(0, 0, 0, 0.45);
+        pointer-events: auto;
     }
-    #controls {
-        flex: 0 0 auto;
+    .hud .row { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+    .hud .row.buttons { justify-content: flex-end; gap: 6px; margin-top: 2px; }
+    .hud .row .label { width: 60px; color: #94a3b8; font-size: 12px; letter-spacing: 0.01em; }
+    .hud .row .value {
+        min-width: 44px; text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #e8eaef; font-size: 12px;
+    }
+
+    /* Buttons */
+    .hud button, button.ghost {
+        background: rgba(255, 255, 255, 0.06);
+        color: #e8eaef;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        padding: 4px 11px;
+        font: 12px/1.2 -apple-system, system-ui, sans-serif;
+        cursor: pointer;
+        transition: background 120ms, border-color 120ms;
+    }
+    .hud button:hover, button.ghost:hover {
+        background: rgba(255, 255, 255, 0.13);
+        border-color: rgba(255, 255, 255, 0.22);
+    }
+    .hud button:active { background: rgba(255, 255, 255, 0.20); }
+
+    /* Custom range slider */
+    input[type="range"].slider {
+        -webkit-appearance: none; appearance: none;
+        flex: 1 1 auto; min-width: 110px;
+        height: 18px; background: transparent;
+        cursor: pointer;
+    }
+    input[type="range"].slider:disabled { opacity: 0.4; cursor: default; }
+    input[type="range"].slider::-webkit-slider-runnable-track {
+        height: 3px; background: rgba(255, 255, 255, 0.16);
+        border-radius: 2px;
+    }
+    input[type="range"].slider::-moz-range-track {
+        height: 3px; background: rgba(255, 255, 255, 0.16);
+        border-radius: 2px; border: 0;
+    }
+    input[type="range"].slider::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 14px; height: 14px; margin-top: -5.5px;
+        background: #f8fafc; border-radius: 50%;
+        cursor: pointer; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+    }
+    input[type="range"].slider::-moz-range-thumb {
+        width: 14px; height: 14px;
+        background: #f8fafc; border: 0; border-radius: 50%;
+        cursor: pointer; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+    }
+
+    /* Specific panel placements */
+    #hudCoords {
+        top: 14px; left: 14px;
+        font-variant-numeric: tabular-nums;
+        font-size: 14px; padding: 8px 14px;
+        letter-spacing: 0.02em;
+    }
+    #hudCoords .axis { color: #94a3b8; margin-right: 4px; font-size: 11px; }
+    #hudCoords .sep { display: inline-block; width: 14px; }
+
+    #hudHelp, #hudControls {
+        bottom: 14px;
+        font-size: 11.5px;
         padding: 8px 12px;
-        background: #1c1c1c;
-        border-bottom: 1px solid #333;
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        font-size: 13px;
+        opacity: 0.92;
     }
-    #controls label {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-    }
-    #controls input[type=range] {
-        width: 200px;
-    }
-    #panels {
-        flex: 1 1 auto;
-        display: flex;
-        min-height: 0;
-    }
-    .panel {
-        flex: 1 1 50%;
-        position: relative;
-        border-left: 1px solid #333;
-    }
-    .panel:first-child {
-        border-left: none;
-    }
-    canvas {
-        display: block;
-        width: 100%;
-        height: 100%;
-    }
-    #intrinsicCanvas {
-        background: linear-gradient(to bottom, #3a6ea5 0%, #9bc4e2 100%);
-    }
-    #extrinsicCanvas {
-        background: #0a0a10;
-    }
-    #footer {
-        flex: 0 0 auto;
-        padding: 6px 12px;
-        background: #1c1c1c;
-        border-top: 1px solid #333;
-        font-size: 12px;
-        color: #aaa;
-    }
-    #controls button {
-        background: rgba(255,255,255,0.06);
-        color: #ccc;
-        border: 1px solid #444;
-        border-radius: 3px;
-        padding: 2px 8px;
-        font-size: 12px;
-        cursor: pointer;
-    }
-    #controls button:hover {
-        background: rgba(255,255,255,0.14);
-        color: #fff;
-    }
-    #fullscreenBtn {
-        position: fixed;
-        right: 10px;
-        bottom: 10px;
-        width: 28px;
-        height: 28px;
-        padding: 0;
-        border: none;
+    #hudHelp { left: 14px; }
+    #hudControls { right: 14px; }
+    .key-row { display: flex; align-items: center; gap: 9px; margin: 3px 0; }
+    .key-row .keys {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 10.5px;
+        color: #cbd5e1;
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.10);
         border-radius: 4px;
-        background: rgba(255, 255, 255, 0.05);
-        color: rgba(255, 255, 255, 0.4);
+        padding: 1px 7px;
+        min-width: 32px;
+        text-align: center;
+        letter-spacing: 0.02em;
+    }
+
+    #hudSettings {
+        top: 14px; right: 14px;
+        min-width: 248px;
+    }
+    #hudSettings .heading {
+        font-size: 11px;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 2px 0 6px;
+        font-weight: 600;
+    }
+
+    #hudSelection {
+        bottom: 14px; left: 14px;
+        background: rgba(255, 224, 90, 0.12);
+        border-color: rgba(255, 224, 90, 0.35);
+        color: #ffe05a;
+        font-size: 12px;
+        padding: 7px 12px;
+    }
+    #hudSelection .name { color: #fff5b8; font-weight: 600; }
+    #hudSelection .hint { color: rgba(255, 224, 90, 0.65); margin-left: 8px; font-size: 11px; }
+
+    #fullscreenBtn {
+        position: fixed; right: 14px; bottom: 14px;
+        width: 30px; height: 30px;
+        padding: 0; border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        background: rgba(15, 18, 24, 0.62);
+        backdrop-filter: blur(16px);
+        color: rgba(255, 255, 255, 0.55);
         cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: background 0.15s ease, color 0.15s ease;
+        display: flex; align-items: center; justify-content: center;
+        transition: all 0.15s ease;
         z-index: 10;
     }
     #fullscreenBtn:hover {
-        background: rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.14);
         color: rgba(255, 255, 255, 0.95);
+        border-color: rgba(255, 255, 255, 0.2);
     }
-    #fullscreenBtn svg {
-        width: 16px;
-        height: 16px;
-    }
+    #fullscreenBtn svg { width: 16px; height: 16px; }
 </style>
 </head>
 <body>
-<div id="controls">
-    <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
-    <label>View: <input id="farSlider" type="range" min="200" max="15000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
-    <button id="farHalfBtn" title="View distance = πR (one half-lap, the antipode)">½ lap</button>
-    <button id="farFullBtn" title="View distance = 2πR (one full lap, back to yourself)">1 lap</button>
-    <label>Walker h: <input id="walkerHSlider" type="range" min="0" max="400" value="0" step="1" disabled><span id="walkerHValue">0</span></label>
-    <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
-    <span id="helpText">Click left to lock · WASD: move (camera-relative) · Mouse: orbit · Space: jump · Drag right to orbit · Middle-drag to pan · Wheel zoom</span>
-</div>
 <div id="panels">
-    <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
-    <div class="panel"><canvas id="extrinsicCanvas"></canvas></div>
+    <div class="panel">
+        <canvas id="intrinsicCanvas"></canvas>
+        <div class="hud" id="hudCoords">
+            <span class="axis">θ</span><span id="coordsTheta">0.0</span>°<span class="sep"></span><span class="axis">φ</span><span id="coordsPhi">0.0</span>°
+        </div>
+        <div class="hud" id="hudHelp">
+            <div class="key-row"><span class="keys">WASD</span><span>move</span></div>
+            <div class="key-row"><span class="keys">Space</span><span>jump</span></div>
+            <div class="key-row"><span class="keys">Mouse</span><span>aim camera</span></div>
+            <div class="key-row"><span class="keys">Wheel</span><span>zoom</span></div>
+        </div>
+    </div>
+    <div class="panel">
+        <canvas id="extrinsicCanvas"></canvas>
+        <div class="hud" id="hudSettings">
+            <div class="heading">World</div>
+            <div class="row">
+                <span class="label">Radius</span>
+                <input id="rSlider" type="range" min="100" max="2000" value="500" class="slider" disabled>
+                <span class="value" id="rValue">500</span>
+            </div>
+            <div class="row">
+                <span class="label">View dist.</span>
+                <input id="farSlider" type="range" min="200" max="15000" value="4000" step="50" class="slider" disabled>
+                <span class="value" id="farValue">4000</span>
+            </div>
+            <div class="row buttons">
+                <button id="farHalfBtn" title="View distance = πR (the antipode)">½ lap</button>
+                <button id="farFullBtn" title="View distance = 2πR (one full lap)">1 lap</button>
+            </div>
+            <div class="row">
+                <span class="label">Walker h</span>
+                <input id="walkerHSlider" type="range" min="0" max="400" value="0" step="1" class="slider" disabled>
+                <span class="value" id="walkerHValue">0</span>
+            </div>
+        </div>
+        <div class="hud" id="hudControls">
+            <div class="key-row"><span class="keys">LMB</span><span>orbit / pick</span></div>
+            <div class="key-row"><span class="keys">MMB</span><span>pan</span></div>
+            <div class="key-row"><span class="keys">RMB</span><span>look</span></div>
+            <div class="key-row"><span class="keys">Wheel</span><span>zoom</span></div>
+            <div class="key-row"><span class="keys">F</span><span>focus selection</span></div>
+        </div>
+        <div class="hud" id="hudSelection" style="display: none;">
+            <span class="name" id="selectionLabel">—</span><span class="hint">F to focus</span>
+        </div>
+    </div>
 </div>
-<div id="footer">Left: intrinsic (the world). Right: extrinsic (Euclidean embedding).</div>
 <button id="fullscreenBtn" title="Fullscreen" aria-label="Toggle fullscreen">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -893,6 +984,9 @@ function makePlatform(upWorld, h, width, depth, height) {
         upWorld,
         h,
         height,
+        _platformW: width,
+        _platformH: height,
+        _platformD: depth,
         footprintRadius: Math.max(width, depth) * 0.5  // for player landing CCD
     };
 }
@@ -926,6 +1020,130 @@ function makeExtrinsicView(canvas) {
     const _camUp = new THREE.Vector3();
     const _camForward = new THREE.Vector3();
 
+    // Selection state. Selecting an entity (or the planet) puts a yellow
+    // wireframe sphere around it; pressing F focuses the orbit target on it.
+    // Each entity kind has a center offset along upWorld (so the focus is
+    // mid-body, not at the surface) and a hit radius for both ray-vs-sphere
+    // pick and the visible highlight.
+    const FOCUS_OFFSET = {
+        player: PLAYER_H * 0.5, walker: 12, tree: 60, smiley: 0,
+        pole: 150, platform: 11
+    };
+    const HIT_RADIUS = {
+        player: 22, walker: 20, tree: 60, smiley: 90,
+        pole: 155, platform: 30
+    };
+    const raycaster = new THREE.Raycaster();
+    const _ndc = new THREE.Vector2();
+    const _entityCenter = new THREE.Vector3();
+    let selection = null;   // { kind: 'entity'|'planet', entity?, focus, radius }
+    // Per-kind wireframe outlines so the highlight matches the entity's
+    // shape — sphere for the planet/smiley, cylinder for tall thin things
+    // like the pole, box for cuboid entities. Built lazily on first
+    // selection and cached on the entity (planetWireGeo for the planet).
+    const _planetWireGeo = new THREE.SphereGeometry(R_INITIAL, 32, 24);
+    const SELECTION_MAT = new THREE.MeshBasicMaterial({
+        color: 0xffe14a, wireframe: true, transparent: true, opacity: 0.55
+    });
+    const selectionMesh = new THREE.Mesh(_planetWireGeo, SELECTION_MAT);
+    selectionMesh.visible = false;
+    scene.add(selectionMesh);
+
+    function ensureWireGeo(e) {
+        if (e._wireGeo) return e._wireGeo;
+        const PAD = 4;
+        let g;
+        switch (e.kind) {
+            case 'player':
+                g = new THREE.BoxGeometry(PLAYER_W + PAD, PLAYER_H + PAD, PLAYER_W + PAD);
+                g.translate(0, PLAYER_H * 0.5, 0); break;
+            case 'walker':
+                g = new THREE.BoxGeometry(20 + PAD, 24 + PAD, 20 + PAD);
+                g.translate(0, 12, 0); break;
+            case 'tree':
+                g = new THREE.CylinderGeometry(36, 16, 112, 14);
+                g.translate(0, 56, 0); break;
+            case 'smiley':
+                g = new THREE.SphereGeometry(85, 18, 12); break;
+            case 'pole':
+                g = new THREE.CylinderGeometry(10, 10, 305, 10);
+                g.translate(0, 150, 0); break;
+            case 'platform':
+                g = new THREE.BoxGeometry(
+                    (e._platformW || 50) + PAD,
+                    (e._platformH || 22) + PAD,
+                    (e._platformD || 50) + PAD
+                );
+                g.translate(0, (e._platformH || 22) * 0.5, 0); break;
+            default:
+                g = new THREE.SphereGeometry(25, 16, 12);
+        }
+        e._wireGeo = g;
+        return g;
+    }
+
+    function entityCenter(e, out) {
+        const upWorld = (e.frame ? e.frame.up() : e.upWorld);
+        const centerH = (e.h || 0) + (FOCUS_OFFSET[e.kind] || 0);
+        return out.copy(upWorld).multiplyScalar(R + centerH);
+    }
+    function raySphereT(ro, rd, cx, cy, cz, r) {
+        const ox = ro.x - cx, oy = ro.y - cy, oz = ro.z - cz;
+        const b = ox * rd.x + oy * rd.y + oz * rd.z;
+        const c = ox*ox + oy*oy + oz*oz - r*r;
+        const disc = b*b - c;
+        if (disc < 0) return null;
+        const t = -b - Math.sqrt(disc);
+        return (t < 0) ? null : t;
+    }
+    function pickAt(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(_ndc, camera);
+        const ro = raycaster.ray.origin;
+        const rd = raycaster.ray.direction;
+        let bestT = Infinity, best = null;
+        for (const e of entities) {
+            entityCenter(e, _entityCenter);
+            const r = HIT_RADIUS[e.kind] || 25;
+            const t = raySphereT(ro, rd, _entityCenter.x, _entityCenter.y, _entityCenter.z, r);
+            if (t !== null && t < bestT) {
+                bestT = t;
+                best = { kind: 'entity', entity: e, focus: _entityCenter.clone(), radius: r };
+            }
+        }
+        // Planet — sphere at origin, radius R.
+        const tPlanet = raySphereT(ro, rd, 0, 0, 0, R);
+        if (tPlanet !== null && tPlanet < bestT) {
+            best = { kind: 'planet', focus: new THREE.Vector3(0, 0, 0), radius: R };
+        }
+        return best;
+    }
+    function updateSelection() {
+        if (!selection) { selectionMesh.visible = false; return; }
+        selectionMesh.visible = true;
+        if (selection.kind === 'planet') {
+            selectionMesh.geometry = _planetWireGeo;
+            selectionMesh.position.set(0, 0, 0);
+            selectionMesh.quaternion.identity();
+            selectionMesh.scale.setScalar(R / R_INITIAL * 1.012);
+            return;
+        }
+        // Entity — fit a kind-specific wireframe shape, oriented vertically
+        // along the entity's surface up.
+        const e = selection.entity;
+        selectionMesh.geometry = ensureWireGeo(e);
+        const upWorld = (e.frame ? e.frame.up() : e.upWorld);
+        // Place the highlight at the entity's surface point (y=0 of the
+        // wire geo is the base, since each geo's translate matches the
+        // entity's local layout).
+        const h = e.h || 0;
+        selectionMesh.position.copy(upWorld).multiplyScalar(R + h);
+        selectionMesh.quaternion.setFromUnitVectors(Y_AXIS, upWorld);
+        selectionMesh.scale.setScalar(1);
+    }
+
     function applyOrbit() {
         const ce = Math.cos(orbit.elevation);
         const se = Math.sin(orbit.elevation);
@@ -948,6 +1166,7 @@ function makeExtrinsicView(canvas) {
     //   Alt + RMB drag  — drag-zoom (vertical drag changes radius)
     //   Wheel           — zoom (radius)
     //   F               — frame the planet center (reset target to origin)
+    let pointerDownX = 0, pointerDownY = 0;
     canvas.style.cursor = 'grab';
     canvas.addEventListener('pointerdown', (e) => {
         const alt = e.altKey;
@@ -957,6 +1176,8 @@ function makeExtrinsicView(canvas) {
         else if (e.button === 2 && !alt)       orbit.mode = 'fpsLook';
         else return;
         e.preventDefault();
+        pointerDownX = e.clientX;
+        pointerDownY = e.clientY;
         orbit.lastX = e.clientX;
         orbit.lastY = e.clientY;
         canvas.setPointerCapture(e.pointerId);
@@ -1010,6 +1231,13 @@ function makeExtrinsicView(canvas) {
     });
     function endDrag(e) {
         if (!orbit.mode) return;
+        // Detect click vs drag — small movement on LMB → pick selection.
+        const dx = e.clientX - pointerDownX;
+        const dy = e.clientY - pointerDownY;
+        const wasClick = (dx * dx + dy * dy) < 25;
+        if (wasClick && orbit.mode === 'orbit' && e.button === 0) {
+            selection = pickAt(e.clientX, e.clientY);
+        }
         orbit.mode = null;
         try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
         canvas.style.cursor = 'grab';
@@ -1025,8 +1253,17 @@ function makeExtrinsicView(canvas) {
     canvas.tabIndex = 0;  // make canvas focusable so it can receive key events
     canvas.addEventListener('keydown', (e) => {
         if (e.key === 'f' || e.key === 'F') {
-            orbit.target.set(0, 0, 0);
+            // F focuses on the selected object (or the planet center if nothing selected).
+            if (selection) {
+                if (selection.kind === 'entity') entityCenter(selection.entity, selection.focus);
+                orbit.target.copy(selection.focus);
+            } else {
+                orbit.target.set(0, 0, 0);
+            }
             applyOrbit();
+            e.preventDefault();
+        } else if (e.key === 'Escape') {
+            selection = null;
             e.preventDefault();
         }
     });
@@ -1049,10 +1286,14 @@ function makeExtrinsicView(canvas) {
     }
 
     function render() {
+        updateSelection();
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, sphere, orbit, applyOrbit, resize, render };
+    return {
+        scene, camera, renderer, sphere, orbit, applyOrbit, resize, render,
+        getSelection: () => selection
+    };
 }
 
 // ===== Intrinsic view: standard Three.js camera looking at a flat plane.
@@ -1214,8 +1455,14 @@ function addEntity(e) {
 // Two walkers spawning at the player's surface position, each travelling
 // along a great circle perpendicular to the other. Speed is angular
 // (rad/s); π = one full lap every 2 seconds, regardless of R.
-addEntity(makeWalker(0xe84c4c, Math.PI, arcUp(0, 0), Y_AXIS.clone()));   // red, north
-addEntity(makeWalker(0x4c8ae8, Math.PI, arcUp(0, 0), X_AXIS.clone()));   // blue, east
+{
+    const red  = makeWalker(0xe84c4c, Math.PI, arcUp(0, 0), Y_AXIS.clone());
+    red.label  = 'Red walker';
+    addEntity(red);
+    const blue = makeWalker(0x4c8ae8, Math.PI, arcUp(0, 0), X_AXIS.clone());
+    blue.label = 'Blue walker';
+    addEntity(blue);
+}
 
 // Three landmarks forming a triangle around spawn at radius ~80m.
 addEntity(makeTree(arcUp(80, 0)));                                  // bearing 0° (north)
@@ -1472,14 +1719,32 @@ function setR(newR) {
 }
 
 // ===== Coordinate readout =====
-const coordsEl = document.getElementById('coords');
+const coordsThetaEl = document.getElementById('coordsTheta');
+const coordsPhiEl   = document.getElementById('coordsPhi');
 function updateCoordsReadout() {
     const up = world.frame.up();
     const phi = Math.asin(Math.max(-1, Math.min(1, up.y)));
     const theta = Math.atan2(up.z, up.x);
-    const t = (theta * 180 / Math.PI).toFixed(1);
-    const p = (phi   * 180 / Math.PI).toFixed(1);
-    coordsEl.textContent = `θ ${t}°   φ ${p}°`;
+    coordsThetaEl.textContent = (theta * 180 / Math.PI).toFixed(1);
+    coordsPhiEl.textContent   = (phi   * 180 / Math.PI).toFixed(1);
+}
+
+// Selection HUD — polled each frame from the loop.
+const selectionPanelEl = document.getElementById('hudSelection');
+const selectionLabelEl = document.getElementById('selectionLabel');
+function entityLabel(e) {
+    if (e.label) return e.label;
+    return e.kind.charAt(0).toUpperCase() + e.kind.slice(1);
+}
+function refreshSelectionHUD() {
+    const sel = extrinsicView.getSelection();
+    if (!sel) {
+        if (selectionPanelEl.style.display !== 'none') selectionPanelEl.style.display = 'none';
+        return;
+    }
+    if (selectionPanelEl.style.display === 'none') selectionPanelEl.style.display = '';
+    const label = (sel.kind === 'planet') ? 'Planet' : entityLabel(sel.entity);
+    if (selectionLabelEl.textContent !== label) selectionLabelEl.textContent = label;
 }
 
 window.addEventListener('keydown', (e) => {
@@ -1642,6 +1907,7 @@ function loop(now) {
     updateCameraSurfaceFrame();
     updateEntities(dt);
     updateCoordsReadout();
+    refreshSelectionHUD();
     intrinsicView.render(world);
     extrinsicView.render();
     requestAnimationFrame(loop);
