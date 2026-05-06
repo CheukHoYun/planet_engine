@@ -714,14 +714,18 @@ function intrinsicGroundMaterial() {
 //
 // Resolution: 240 segments around (one every 1.5° of angle), 12 across.
 function buildRibbonGeometry() {
-    const segU = 240;
+    // The Möbius parametric has period 4π in its angle (= 2L in u). One
+    // lap of u covers half the period; the ribbon only closes after TWO
+    // laps. We mesh over [0, 2L] so any cover-u in the canonical [0, 2L)
+    // range lands on a rendered triangle.
+    const segU = 480;
     const segV = 12;
     const positions = [];
     const indices = [];
     for (let j = 0; j <= segV; j++) {
         const v = -W_INITIAL + (2 * W_INITIAL) * (j / segV);
         for (let i = 0; i <= segU; i++) {
-            const uArc = (2 * Math.PI * R_INITIAL) * (i / segU);  // [0, L_INITIAL]
+            const uArc = (2 * 2 * Math.PI * R_INITIAL) * (i / segU);  // [0, 2L_INITIAL]
             positions.push(uArc, 0, v);
         }
     }
@@ -755,7 +759,7 @@ function updateRibbonGeometry(geo) {
     for (let j = 0; j <= segV; j++) {
         const v = -W + (2 * W) * (j / segV);
         for (let i = 0; i <= segU; i++) {
-            const uArc = L * (i / segU);
+            const uArc = (2 * L) * (i / segU);   // [0, 2L]
             arr[k++] = uArc;
             arr[k++] = 0;
             arr[k++] = v;
@@ -772,15 +776,14 @@ function updateRibbonGeometry(geo) {
 // at +W, solid blue at -W.
 const EDGE_BAND_HALF_THICKNESS = 0.6;  // ±0.6m thick (in h direction)
 function buildEdgeBandGeometry(sign) {
-    const segU = 240;
+    // Same period-2L range as the ribbon mesh.
+    const segU = 480;
     const positions = [];
     const indices = [];
-    // Two strips, one on each side of v = sign·W: form a rectangular cross-
-    // section ribbon hugging the edge.
     for (let j = -1; j <= 1; j += 2) {
         const yOff = j * EDGE_BAND_HALF_THICKNESS;
         for (let i = 0; i <= segU; i++) {
-            const uArc = L * (i / segU);
+            const uArc = (2 * L) * (i / segU);
             positions.push(uArc, yOff, sign * W);
         }
     }
@@ -807,7 +810,7 @@ function updateEdgeBandGeometry(geo) {
     for (let j = -1; j <= 1; j += 2) {
         const yOff = j * EDGE_BAND_HALF_THICKNESS;
         for (let i = 0; i <= segU; i++) {
-            const uArc = L * (i / segU);
+            const uArc = (2 * L) * (i / segU);
             arr[k++] = uArc;
             arr[k++] = yOff;
             arr[k++] = sign * W;
@@ -1808,22 +1811,17 @@ function updateEntities(dt) {
         }
 
         // Extrinsic: push uniforms; the embedding shader handles placement.
-        // The extrinsic view always renders the entity at its CANONICAL
-        // (n=0) cover position. The (-h)·(-n) self-consistency means any
-        // n-shifted rep would yield the same 3D point anyway.
+        // No mod — the embedding's parametric has period 4π in its angle
+        // parameter (cos(u/2) flips sign at angle=2π and only returns at 4π).
+        // Mapping that back to u: period = 2L. So one full "round trip" of
+        // the ribbon takes the inhabitant TWO laps, not one. The ribbon's
+        // half-twist means u and u+L embed to deck-equivalent (and visually
+        // distinct) 3D points. Wrapping extU at L would have caused the
+        // entity to teleport across that visual gap every time world.u
+        // crosses L. world.u is already in [0, 2L) thanks to normalize, so
+        // we just feed it through.
         const u = e.entityUniforms;
-        // For the extrinsic view we want a position in [0, L) so the
-        // embedding doesn't spin the entity around the ribbon repeatedly.
-        let extU = eu;
-        const period = 2 * L;
-        while (extU >= L) extU -= L;     // bring into [0, L)
-        while (extU < 0)  extU += L;
-        // Note: applying %L (not %2L) for extrinsic means each lap of cover-u
-        // visually places the entity at the same ribbon location, but with
-        // alternating side because the embedding has period 2π in its own
-        // angle parameter. That's correct: one lap of cover-u IS one full
-        // trip around the ribbon for the embedding.
-        u.uObjU.value    = extU;
+        u.uObjU.value    = eu;
         u.uObjV.value    = ev;
         u.uObjBeta.value = eb;
         u.uObjH.value    = eh;
