@@ -92,7 +92,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="1000" value="300"><span id="rValue">300</span></label>
-    <span id="helpText">Arrow keys: walk &amp; jump · Wheel: zoom (left = camera FOV; right = planet scale) · Drag right view: pan · R slider: world radius</span>
+    <span id="helpText">A/D walk · W or Space: jump · Wheel: zoom (left = camera FOV; right = planet scale) · Drag right view: pan · R slider: world radius</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -827,24 +827,24 @@ camera.setTarget(player);
 
 const keys = {};
 window.addEventListener('keydown', (ev) => {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(ev.key)) {
+    const k = ev.key.toLowerCase();
+    if (['w', 'a', 's', 'd', ' '].includes(k)) {
         ev.preventDefault();
     }
-    keys[ev.key] = true;
-    // Jump only on initial press (not browser key-repeat) and only when
-    // resting on a surface — the world floor or any solid entity's top.
-    if (ev.key === 'ArrowUp' && !ev.repeat && player.grounded) {
+    keys[k] = true;
+    // Jump on Space (or W) initial press, only when grounded.
+    if ((k === ' ' || k === 'w') && !ev.repeat && player.grounded) {
         player.vh = JUMP_VEL;
     }
 });
 window.addEventListener('keyup', (ev) => {
-    keys[ev.key] = false;
+    keys[ev.key.toLowerCase()] = false;
 });
 
 function applyPlayerInput() {
     let walk = 0;
-    if (keys['ArrowLeft']) walk -= 1;
-    if (keys['ArrowRight']) walk += 1;
+    if (keys['a']) walk -= 1;
+    if (keys['d']) walk += 1;
     player.vθ = walk * SPEED_ARC / world.R;
     if (walk !== 0) {
         const newFacing = walk > 0 ? 1 : -1;

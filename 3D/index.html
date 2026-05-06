@@ -101,7 +101,7 @@
     <label>View: <input id="farSlider" type="range" min="200" max="12000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
     <label>Walker h: <input id="walkerHSlider" type="range" min="0" max="400" value="0" step="1" disabled><span id="walkerHValue">0</span></label>
     <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
-    <span id="helpText">Click left to lock · W/S walk · A/D turn · Mouse: orbit camera · Space: jump · Drag right to orbit · Wheel zoom</span>
+    <span id="helpText">Click left to lock · WASD: move (camera-relative) · Mouse: orbit · Space: jump · Drag right to orbit · Middle-drag to pan · Wheel zoom</span>
 </div>
 <div id="panels">
     <div class="panel"><canvas id="intrinsicCanvas"></canvas></div>
@@ -1136,6 +1136,7 @@ addEntity(makePlatform(arcUp(-40, -69), 0, 45, 45, 22));            // bearing 2
 addEntity(makeSmiley(arcUp(150, 100), 400, 80));
 
 const _entityPos = new THREE.Vector3();
+const _moveDirWorld = new THREE.Vector3();
 
 // Scratch vectors for entity orientation projection.
 const _eR = new THREE.Vector3();
@@ -1264,9 +1265,10 @@ function updateEntities(dt) {
 // ===== Input =====
 //
 // Mouse  — orbits the camera around the player (azimuth + elevation).
-//          The character's facing direction is independent; A/D turn it.
-// W/S    — walk forward/back along the character's facing direction.
-// A/D    — turn the character left/right.
+// W/A/S/D — move the character RELATIVE TO THE CAMERA's view direction
+//           (W = away from camera, S = toward camera, A/D = camera-left/
+//           right). The character automatically rotates to face the
+//           movement direction. Modern third-person convention.
 // Space  — jump (only when grounded).
 const keys = { w: false, a: false, s: false, d: false };
 let pointerLocked = false;
@@ -1427,15 +1429,31 @@ function integrate(dt) {
         pitchAccum = 0;
     }
 
-    // W/S — walk forward / back along player's facing.
-    const walkSign = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
-    if (walkSign !== 0) {
-        world.frame.rotateAround(world.frame.right(), -walkSign * WALK_SPEED * dt / R);
-    }
-    // A/D — turn the character left / right (yaw the SO(3) frame around its own up axis).
-    const turnSign = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
-    if (turnSign !== 0) {
-        world.frame.rotateAround(world.frame.up(), -turnSign * TURN_SPEED * dt);
+    // WASD movement, camera-relative. Aligning the character to the
+    // movement direction is the modern third-person convention; A/D no
+    // longer turn in place.
+    const moveX = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+    const moveZ = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+    if (moveX !== 0 || moveZ !== 0) {
+        // Make sure cameraSurfaceFrame is up-to-date for the just-updated
+        // cameraAzim/pitch before reading the camera's world axes.
+        updateCameraSurfaceFrame();
+        const camR = cameraSurfaceFrame.right();
+        const camF = cameraSurfaceFrame.forward();
+        // Tangent +X = camR; tangent forward (-Z) = camF, so moveZ = -1 (W) → +camF.
+        _moveDirWorld.set(0, 0, 0)
+            .addScaledVector(camR,  moveX)
+            .addScaledVector(camF, -moveZ);
+        // Project onto the player's tangent plane (perpendicular to player.up).
+        const pUp = world.frame.up().clone();
+        _moveDirWorld.addScaledVector(pUp, -pUp.dot(_moveDirWorld));
+        if (_moveDirWorld.lengthSq() > 1e-6) {
+            _moveDirWorld.normalize();
+            // Snap the character to face the movement direction, then walk
+            // forward (rotation around frame.right by -v·dt/R).
+            setFrameFromUpForward(world.frame, pUp, _moveDirWorld);
+            world.frame.rotateAround(world.frame.right(), -WALK_SPEED * dt / R);
+        }
     }
 
     // Vertical physics: gravity, ground/platform collision.
