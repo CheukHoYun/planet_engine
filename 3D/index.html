@@ -1137,6 +1137,8 @@ addEntity(makeSmiley(arcUp(150, 100), 400, 80));
 
 const _entityPos = new THREE.Vector3();
 const _moveDirWorld = new THREE.Vector3();
+const _oldFwd = new THREE.Vector3();
+const _crossTmp = new THREE.Vector3();
 
 // Scratch vectors for entity orientation projection.
 const _eR = new THREE.Vector3();
@@ -1449,9 +1451,21 @@ function integrate(dt) {
         _moveDirWorld.addScaledVector(pUp, -pUp.dot(_moveDirWorld));
         if (_moveDirWorld.lengthSq() > 1e-6) {
             _moveDirWorld.normalize();
-            // Snap the character to face the movement direction, then walk
-            // forward (rotation around frame.right by -v·dt/R).
+            // Capture old forward — we need to compensate cameraAzim by the
+            // exact angle the player rotates by, so the camera stays put in
+            // world coords (cameraAzim is player-frame-relative; without this
+            // the camera would follow the character's auto-turn).
+            _oldFwd.copy(world.frame.forward());
+            // Snap the character to face the movement direction.
             setFrameFromUpForward(world.frame, pUp, _moveDirWorld);
+            // Signed angle from oldForward to newForward around pUp.
+            const newFwd = world.frame.forward();
+            _crossTmp.crossVectors(_oldFwd, newFwd);
+            const sinA = _crossTmp.dot(pUp);
+            const cosA = _oldFwd.dot(newFwd);
+            const turnAngle = Math.atan2(sinA, cosA);
+            world.cameraAzim -= turnAngle;
+            // Walk forward (rotation around frame.right by -v·dt/R).
             world.frame.rotateAround(world.frame.right(), -WALK_SPEED * dt / R);
         }
     }
