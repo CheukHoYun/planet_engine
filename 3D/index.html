@@ -584,17 +584,12 @@ const VC_MATERIAL = new THREE.MeshBasicMaterial({ vertexColors: true });
 // Shared GLSL helpers: latitude→red/blue concentrated near the poles, plus
 // SDF "N"/"S" letters drawn on the polar caps.
 const POLE_COLOR_GLSL = `
-    // Concentrated red/blue gradient. cMid = neutral middle, polar colors
-    // saturated. Magnitude curve uses a steep power so most of the sphere
-    // stays neutral and the color rapidly intensifies near the poles.
+    // Straight linear blue→red gradient by latitude. Equator = purple.
     vec3 polarColor(float phi) {
-        float s = phi / 1.5707963;                 // -1 at S, +1 at N
-        float k = sign(s) * pow(abs(s), 2.5);
-        vec3 cMid = vec3(0.32, 0.34, 0.34);
-        vec3 cN   = vec3(0.92, 0.10, 0.10);
-        vec3 cS   = vec3(0.10, 0.18, 0.92);
-        vec3 polar = (s > 0.0) ? cN : cS;
-        return mix(cMid, polar, abs(k));
+        float t = 0.5 + 0.5 * (phi / 1.5707963);   // 0 at S, 1 at N
+        vec3 cN = vec3(0.92, 0.10, 0.10);
+        vec3 cS = vec3(0.10, 0.18, 0.92);
+        return mix(cS, cN, t);
     }
     float sdSeg(vec2 p, vec2 a, vec2 b) {
         vec2 pa = p - a, ba = b - a;
