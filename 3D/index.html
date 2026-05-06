@@ -98,6 +98,7 @@
 <body>
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
+    <label>View: <input id="farSlider" type="range" min="200" max="12000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
     <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
     <span id="helpText">Click left to lock · W/S walk · A/D turn · Mouse: orbit camera · Space: jump · Drag right to orbit · Wheel zoom</span>
 </div>
@@ -462,13 +463,16 @@ const EXTRINSIC_FRAGMENT_SHADER = `
         vec3 n = normalize(vWorldPos);
         float phi = asin(clamp(n.y, -1.0, 1.0));
         float theta = atan(n.z, n.x);
-        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
-        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 20.0)));
+        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 20.0)));
         // Fade longitude lines very close to the poles to avoid coord-singularity flicker.
         float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(n.y));
         gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
-        vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
+        // Latitude-based color gradient: red toward N, blue toward S.
+        float t = (phi + 1.5707963) / 3.1415927;   // 0 at S, 1 at N
+        vec3 baseColor = mix(vec3(0.15, 0.22, 0.55), vec3(0.55, 0.22, 0.15), t);
+        vec3 color = mix(baseColor, vec3(0.05, 0.05, 0.05), grid);
         gl_FragColor = vec4(color, 1.0);
     }
 `;
@@ -516,12 +520,15 @@ const INTRINSIC_FRAGMENT_SHADER = `
 
         float phi = asin(clamp(hitPoint.y, -1.0, 1.0));
         float theta = atan(hitPoint.z, hitPoint.x);
-        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 40.0)));
-        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 40.0)));
+        float gridLat = smoothstep(0.94, 0.96, abs(cos(phi * 20.0)));
+        float gridLon = smoothstep(0.94, 0.96, abs(cos(theta * 20.0)));
         float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(hitPoint.y));
         gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
-        vec3 color = mix(vec3(0.25, 0.5, 0.2), vec3(0.1, 0.2, 0.08), grid);
+        // Latitude gradient: red toward N pole, blue toward S pole.
+        float t = (phi + 1.5707963) / 3.1415927;   // 0 at S, 1 at N
+        vec3 baseColor = mix(vec3(0.15, 0.22, 0.55), vec3(0.55, 0.22, 0.15), t);
+        vec3 color = mix(baseColor, vec3(0.05, 0.05, 0.05), grid);
         gl_FragColor = vec4(color, 1.0);
     }
 `;
@@ -737,8 +744,8 @@ function makeTree(upWorld) {
     };
 }
 
-function makeSmiley(upWorld, h) {
-    const RR = 25;
+function makeSmiley(upWorld, h, radius) {
+    const RR = radius || 25;
     const z = -RR * 0.92;
     const eyeGeo = new THREE.SphereGeometry(RR * 0.13, 12, 8);
     const parts = [
@@ -1015,9 +1022,11 @@ const MAX_PREIMAGES = 40;
 
 function maxPreimagesForR(r) {
     const C = 2 * Math.PI * r;
-    // Far limit ≈ GRID_HALF_ARC * 4 = 12000 (intrinsic camera far plane).
+    // Reads the current intrinsic camera far plane so that the View slider's
+    // changes flow through to clone allocation.
+    const farLimit = (typeof intrinsicView !== 'undefined') ? intrinsicView.camera.far : 12000;
     // 2× covers forward + backward direction; +2 for safety/mid-frame R changes.
-    return Math.min(MAX_PREIMAGES, Math.ceil(2 * 12000 / C) + 2);
+    return Math.min(MAX_PREIMAGES, Math.ceil(2 * farLimit / C) + 2);
 }
 
 function fitCloneCount(e, target) {
@@ -1032,12 +1041,14 @@ function fitCloneCount(e, target) {
             intrinsicView.scene.add(clone);
         }
     } else {
-        // Shrink: remove extras from the scene.
+        // Shrink: remove extras from the scene first, then truncate the
+        // array. Truncating inside the loop would make subsequent reads
+        // undefined and leave clones stuck in the scene at their last
+        // position.
         for (let i = have - 1; i >= target; i--) {
-            const c = e.intrinsicCopies[i];
-            intrinsicView.scene.remove(c);
-            e.intrinsicCopies.length = target;
+            intrinsicView.scene.remove(e.intrinsicCopies[i]);
         }
+        e.intrinsicCopies.length = target;
     }
 }
 
@@ -1082,26 +1093,18 @@ function addEntity(e) {
     });
 }
 
-// Walkers wander on great circles. Spread out compared to v0.x so the
-// player can roam without bumping into clusters.
-addEntity(makeWalker(
-    COLOR_WALKER_RED, 35,
-    arcUp(80, 160), projectForward(arcUp(80, 160), Y_AXIS)
-));
-addEntity(makeWalker(
-    COLOR_WALKER_GREEN, -28,
-    arcUp(180, -120), projectForward(arcUp(180, -120), X_AXIS)
-));
+// Two walkers spawning at the player's surface position, each travelling
+// along a great circle perpendicular to the other.
+addEntity(makeWalker(0xe84c4c, 35, arcUp(0, 0), Y_AXIS.clone()));   // red, walks "north"
+addEntity(makeWalker(0x4c8ae8, 35, arcUp(0, 0), X_AXIS.clone()));   // blue, walks "east"
 
-// Static landmarks
-addEntity(makeTree(arcUp(150, -200)));
-addEntity(makeSmiley(arcUp(320, 100), 180));
-addEntity(makeStripedPole(arcUp(60, 260)));
+// Three landmarks forming a triangle around spawn at radius ~80m.
+addEntity(makeTree(arcUp(80, 0)));                                  // bearing 0° (north)
+addEntity(makeStripedPole(arcUp(-40, 69)));                         // bearing 120°
+addEntity(makePlatform(arcUp(-40, -69), 0, 45, 45, 22));            // bearing 240°
 
-// Platforms
-addEntity(makePlatform(arcUp(-90, 110), 0, 50, 50, 22));
-addEntity(makePlatform(arcUp(-140, -180), 0, 40, 60, 18));
-addEntity(makePlatform(arcUp(240, -40), 0, 35, 35, 28));
+// Smiling face floating high overhead — bigger and further up than v0.x.
+addEntity(makeSmiley(arcUp(150, 100), 400, 80));
 
 const _entityPos = new THREE.Vector3();
 
@@ -1277,6 +1280,28 @@ rValueEl.textContent = String(Math.round(R));
 rSlider.addEventListener('input', () => {
     const newR = parseFloat(rSlider.value);
     setR(newR);
+});
+
+// View distance slider — controls the intrinsic camera's far plane. Drag it
+// down and entities further than the new far plane stop rendering, including
+// universal-cover preimages, so wrap copies "naturally" disappear at small R.
+const farSlider = document.getElementById('farSlider');
+const farValueEl = document.getElementById('farValue');
+farSlider.disabled = false;
+farSlider.value = String(intrinsicView.camera.far);
+farValueEl.textContent = String(Math.round(intrinsicView.camera.far));
+
+function setIntrinsicFar(newFar) {
+    intrinsicView.camera.far = newFar;
+    intrinsicView.camera.updateProjectionMatrix();
+    farValueEl.textContent = String(Math.round(newFar));
+    // Re-fit clone counts; visible preimages depend on far.
+    const target = maxPreimagesForR(R);
+    for (const e of entities) fitCloneCount(e, target);
+}
+
+farSlider.addEventListener('input', () => {
+    setIntrinsicFar(parseFloat(farSlider.value));
 });
 
 function setR(newR) {
