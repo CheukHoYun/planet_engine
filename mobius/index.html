@@ -295,73 +295,47 @@ const GRID_HALF_ARC = 15000.0;      // matches the View slider's max
 const DEFAULT_FAR   = 4000.0;
 
 // ===== Player state =====
-//   u, v          strip-canonical coords
-//   beta          bearing (0 = +u direction, π/2 = +v direction)
-//   h, vh         signed height + vertical velocity in the current patch;
-//                 PHYSICAL height is |h|, sign = parity bit
-//   parity        ±1; flips on every wrap. Tracks which face of the strip
-//                 the chart is currently on (matters at h=0 for jump
-//                 direction and mesh orientation)
-//   grounded      standing on ground or platform
-//   pitch         camera elevation around the player (mouse-Y)
-//   cameraAzim    camera horizontal angle around the player (mouse-X)
+//
+// Fix B (cover representation): u, v, h, β, vh are kept in COVER throughout.
+// `u` is unbounded — wrapping is implicit in the rendering's preimage
+// enumeration. We periodically take u mod 2L for float hygiene; the deck
+// transformation has period 2 (two applications recover the identity), so
+// a 2L-shift in u is physically AND orientationally a no-op.
+//
+// No `parity` bit. The "side A / side B" badge is derived from
+// floor(u / L) mod 2 — non-essential bookkeeping, computed only for the HUD.
+//
+// Why not Fix A (parity-flipping normalize): with Fix A the camera and the
+// player can be normalized into deck-equivalent-but-different cover-reps
+// across a wrap boundary, and the (u, v) basis at one rep is rotated
+// relative to the other (the v-axis is flipped). That makes du/dv
+// across-rep meaningless and the camera view jumps at every wrap. Fix B
+// avoids the issue entirely by keeping a single consistent cover rep.
 const world = {
     u: 0, v: 0, beta: 0,
     h: 0, vh: 0,
-    parity: 1,
     grounded: true,
     pitch: 0.20,
     cameraAzim: 0
 };
 
-// Camera-surface state — recomputed every frame from world + orbit.
-// Same shape as `world`. The intrinsic view is rendered with this point
-// at the tangent-plane origin so the player is just another entity.
+// Camera-surface state. Lives in COVER too. No normalize, no parity.
 const cameraSurface = {
-    u: 0, v: 0, beta: 0,
-    h: 0, vh: 0,
-    parity: 1,
-    grounded: true
+    u: 0, v: 0, beta: 0, h: 0
 };
 
-// ===== The deck transformation =====
+// ===== Light-touch normalization =====
 //
-// When `s.u` leaves [0, L), apply (u, v, h) ~ (u+L, -v, -h):
-//   • shift u by ±L
-//   • negate v, β, h, vh
-//   • flip parity
-//
-// All five signed quantities flip together — that's what keeps the
-// extrinsic embedding (-h)·(-n) = h·n self-consistent. The player's
-// experience is unchanged (they're still 1.7m above the ground from
-// their POV); only the COORDINATE LABEL of "up" has reversed.
+// Wraps `u` into [0, 2L) for float hygiene; clamps `v` to [−W, W]. Does
+// NOT flip signs of v, β, h, vh — those are cover quantities and the
+// deck transform is implicit in the rendering's preimage enumeration.
 function normalize(s) {
-    while (s.u >= L) {
-        s.u -= L;
-        s.v   = -s.v;
-        s.beta = -s.beta;
-        s.h   = -s.h;
-        s.vh  = -s.vh;
-        s.parity = -s.parity;
-    }
-    while (s.u < 0) {
-        s.u += L;
-        s.v   = -s.v;
-        s.beta = -s.beta;
-        s.h   = -s.h;
-        s.vh  = -s.vh;
-        s.parity = -s.parity;
-    }
+    const period = 2 * L;
+    while (s.u >= period) s.u -= period;
+    while (s.u < 0)        s.u += period;
     if (s.v >  W) s.v =  W;
     if (s.v < -W) s.v = -W;
 }
-
-// Strip-coords → cover-coords for a state. The player and camera live
-// in strip-canonical coords with parity; for rendering we project the
-// world into a cover-aligned Three.js frame so "+y is sky" is unambiguous.
-function coverV(s) { return s.parity * s.v; }
-function coverH(s) { return s.parity * s.h; }
-function coverBeta(s) { return s.parity * s.beta; }
 
 // ===== Camera surface point =====
 //
@@ -369,16 +343,14 @@ function coverBeta(s) { return s.parity * s.beta; }
 // rotated by `cameraAzim` around the player's vertical axis. In strip-coords
 // the player's bearing-+π is "behind"; bearing-+π+azim adds the orbit angle.
 function updateCameraSurface() {
-    const cosE = Math.cos(world.pitch);
-    const horizDist = ORBIT_RADIUS * cosE;
+    const horizDist = ORBIT_RADIUS * Math.cos(world.pitch);
     const camBearing = world.beta + Math.PI + world.cameraAzim;
     cameraSurface.u    = world.u + horizDist * Math.cos(camBearing);
     cameraSurface.v    = world.v + horizDist * Math.sin(camBearing);
     cameraSurface.beta = world.beta + world.cameraAzim;
-    cameraSurface.h    = world.h;       // tracks player height (so jumps follow)
-    cameraSurface.vh   = 0;
-    cameraSurface.parity = world.parity;
-    normalize(cameraSurface);           // wraps independently if needed
+    cameraSurface.h    = world.h;       // tracks player height
+    // No normalize: cameraSurface is in cover. It can have negative u or u>L
+    // — that's fine; preimage enumeration anchors around it.
 }
 
 // ===== projectToTangent =====
@@ -467,11 +439,11 @@ const INTRINSIC_FRAGMENT_SHADER = `
         hitU -= wraps * uL;
         if (mod(abs(wraps), 2.0) > 0.5) hitV = -hitV;
 
-        // Outside the strip: transparent (sky beyond, void below).
-        if (abs(hitV) > uW) {
-            gl_FragColor = vec4(0.0);
-            return;
-        }
+        // Outside the strip: drop the fragment with discard (not alpha=0 +
+        // transparent). Discard keeps the depth buffer correct so anything
+        // behind the strip is properly occluded; otherwise an n=1 preimage
+        // could bleed through the strip's surface.
+        if (abs(hitV) > uW) discard;
 
         // Grid: 20 lines per lap in u, 10 lines across in v.
         float gridU = smoothstep(0.94, 0.96, abs(cos(hitU * 6.283185 * 10.0 / uL)));
@@ -701,7 +673,10 @@ function intrinsicGroundMaterial() {
         vertexShader:   INTRINSIC_VERTEX_SHADER,
         fragmentShader: INTRINSIC_FRAGMENT_SHADER,
         side: THREE.DoubleSide,
-        transparent: true,
+        // Opaque — fragments outside the strip use `discard`, which leaves
+        // the depth buffer alone. `transparent: true` would put this in the
+        // transparent render queue and break occlusion of below-strip geometry.
+        transparent: false,
         uniforms: {
             uCamU:    { value: 0 },
             uCamV:    { value: 0 },
@@ -1606,16 +1581,16 @@ function makeIntrinsicView(canvas) {
     const _playerTangentTmp = new THREE.Vector3();
 
     function placeCamera(world) {
-        // Three.js coords aligned with the camera's COVER tangent frame.
-        // Camera height: ORBIT_RADIUS·sin(pitch) above the cameraSurface.
+        // Three.js +Y = cover +h (sky). Camera sits ORBIT_RADIUS·sin(pitch)
+        // above the cameraSurface (which is in cover coords directly).
         const camY = ORBIT_RADIUS * Math.sin(world.pitch);
         camera.position.set(0, camY, 0);
         camera.up.set(0, 1, 0);
-        // Player relative to cameraSurface, in cover.
+        // Player relative to cameraSurface — both already in cover.
         projectToTangent(
-            world.u, coverV(world), coverH(world),
-            cameraSurface.u, coverV(cameraSurface), coverH(cameraSurface),
-            coverBeta(cameraSurface),
+            world.u, world.v, world.h,
+            cameraSurface.u, cameraSurface.v, cameraSurface.h,
+            cameraSurface.beta,
             _playerTangentTmp
         );
         _lookTarget.set(
@@ -1629,8 +1604,8 @@ function makeIntrinsicView(canvas) {
     function updateGroundUniforms() {
         const u = ground.material.uniforms;
         u.uCamU.value    = cameraSurface.u;
-        u.uCamV.value    = coverV(cameraSurface);
-        u.uCamBeta.value = coverBeta(cameraSurface);
+        u.uCamV.value    = cameraSurface.v;
+        u.uCamBeta.value = cameraSurface.beta;
     }
 
     function resize() {
@@ -1712,6 +1687,9 @@ function addEntity(e) {
         intrinsicMesh: makePlayerMeshIntrinsic(),
         extrinsicMesh: makePlayerMeshExtrinsic((c) => embeddingMaterial(c, playerUniforms)),
         entityUniforms: playerUniforms,
+        // world.u/v/h/beta are cover values directly (Fix B). The preimage
+        // loop renders the player's cover-orbit (with mirroring on odd n)
+        // and picks the closest one to the camera.
         get u()    { return world.u; },
         get v()    { return world.v; },
         get beta() { return world.beta; },
@@ -1743,66 +1721,66 @@ addEntity(makeSmiley(500, 0, 80, 60));
 const _entityPos = new THREE.Vector3();
 
 function updateEntities(dt) {
-    // Walkers walk along +u, in their own bearing. Wrap when u leaves [0, L).
+    // Walkers walk along +u in cover. u is cumulative; wrap by 2L for float
+    // hygiene only (the deck transform has period 2, so 2L preserves
+    // orientation).
     for (const w of walkers) {
         w.u += w.speed * dt;
-        if (w.u >= L) w.u -= L;
-        if (w.u < 0)  w.u += L;
-        // Walkers don't carry the 5-fold flip — they're just objects on the
-        // strip with parity baked in (parity_e = +1 by convention). The
-        // preimage loop renders the appropriate v-flip as needed.
+        const period = 2 * L;
+        while (w.u >= period) w.u -= period;
+        while (w.u < 0)        w.u += period;
     }
 
-    // Camera-surface cover frame.
-    const csCovU = cameraSurface.u;
-    const csCovV = coverV(cameraSurface);
-    const csCovH = coverH(cameraSurface);
-    const csCovBeta = coverBeta(cameraSurface);
-    const farLimit = intrinsicView.camera.far;
+    // Camera-surface cover frame (already cover values directly).
+    const csCovU    = cameraSurface.u;
+    const csCovV    = cameraSurface.v;
+    const csCovH    = cameraSurface.h;
+    const csCovBeta = cameraSurface.beta;
+    const farLimit  = intrinsicView.camera.far;
 
     for (const e of entities) {
         const eu = e.u, ev = e.v, eh = e.h, eb = e.beta || 0;
-        // Number of preimages we'd consider (forward + backward in u).
         const cap = e.intrinsicCopies.length;
-
         let copyIdx = 0;
 
-        // Enumerate preimages by n = 0, ±1, ±2, ... interleaved by distance.
-        // We emit them in pairs (forward n=k, backward n=-k-1) so we run out
-        // of copies at the most distant ones first.
-        const enumOrder = [];
-        let nF = 0, nB = -1;
-        while (enumOrder.length < cap + 4) {
-            enumOrder.push(nF++);
-            enumOrder.push(nB--);
-        }
+        // Anchor preimage enumeration around the n that puts the entity
+        // closest to the camera in cover. With the camera in cover at csCovU
+        // and the entity's canonical at eu, the n-th preimage's u is
+        // (eu + n·L); the closest one has n ≈ round((csCovU − eu) / L).
+        // (Without anchoring, walking a single lap puts the closest preimage
+        // at n=1 and our n=0,−1,1,−2,2 enumeration would skip past the
+        // visible image.)
+        const nCenter = Math.round((csCovU - eu) / L);
 
-        for (const n of enumOrder) {
-            if (copyIdx >= cap) break;
+        // Enumerate nCenter, nCenter+1, nCenter-1, nCenter+2, nCenter-2, ...
+        for (let k = 0; k < cap + 4 && copyIdx < cap; k++) {
+            const n = (k === 0) ? nCenter
+                    : ((k % 2 === 1) ? (nCenter + ((k + 1) >> 1))
+                                     : (nCenter - (k >> 1)));
             const sign = (((n % 2) + 2) % 2) === 0 ? 1 : -1;
             const preU = eu + n * L;
             const preV = sign * ev;
             const preH = sign * eh;
-            // Tangent-frame projection from camera-surface cover frame.
             projectToTangent(preU, preV, preH, csCovU, csCovV, csCovH, csCovBeta, _entityPos);
             const x = _entityPos.x, y = _entityPos.y, z = _entityPos.z;
-            // Distance from camera in tangent X-Z (horizontal). Cull beyond
-            // the camera far plane.
             const dist = Math.sqrt(x * x + z * z);
             if (dist > farLimit) continue;
 
             const c = e.intrinsicCopies[copyIdx++];
             c.visible = true;
             c.position.set(x, y, z);
-            // Mesh orientation: cover-bearing of this preimage = sign * eb.
-            // Relative to camera's cover bearing → Three.js Y rotation.
+            // Mesh's cover-bearing for this preimage: deck-transform applied
+            // n times = sign·eb. Relative to camera = meshCovBeta − csCovBeta.
+            // For Three.js Y-rotation: the rotation that takes mesh-local −Z
+            // (default forward) to a cover-direction rotated by Δ = relBeta
+            // is +Δ, NOT −Δ. (Earlier had this inverted, which made meshes
+            // appear to spin when the camera spun.)
             const meshBetaCov = sign * eb;
             const relBeta = meshBetaCov - csCovBeta;
-            c.rotation.set(0, -relBeta, 0);
-            // Mirror on odd-preimage relative to camera's PARITY chart.
-            // sign === -1 means the preimage's chart parity flips relative
-            // to the player's stored canonical (+1) parity. The mesh needs
-            // x AND y axes flipped.
+            c.rotation.set(0, relBeta, 0);
+            // Mirror odd preimages: deck-transform reflects v and h, so the
+            // mesh's local (x, y) axes both flip. DoubleSide materials handle
+            // the winding reversal.
             if (sign < 0) c.scale.set(-1, -1, 1);
             else          c.scale.set( 1,  1, 1);
         }
@@ -1810,9 +1788,23 @@ function updateEntities(dt) {
             e.intrinsicCopies[i].visible = false;
         }
 
-        // Extrinsic: push uniforms, embedding shader does the rest.
+        // Extrinsic: push uniforms; the embedding shader handles placement.
+        // The extrinsic view always renders the entity at its CANONICAL
+        // (n=0) cover position. The (-h)·(-n) self-consistency means any
+        // n-shifted rep would yield the same 3D point anyway.
         const u = e.entityUniforms;
-        u.uObjU.value    = eu;
+        // For the extrinsic view we want a position in [0, L) so the
+        // embedding doesn't spin the entity around the ribbon repeatedly.
+        let extU = eu;
+        const period = 2 * L;
+        while (extU >= L) extU -= L;     // bring into [0, L)
+        while (extU < 0)  extU += L;
+        // Note: applying %L (not %2L) for extrinsic means each lap of cover-u
+        // visually places the entity at the same ribbon location, but with
+        // alternating side because the embedding has period 2π in its own
+        // angle parameter. That's correct: one lap of cover-u IS one full
+        // trip around the ribbon for the embedding.
+        u.uObjU.value    = extU;
         u.uObjV.value    = ev;
         u.uObjBeta.value = eb;
         u.uObjH.value    = eh;
@@ -1854,10 +1846,7 @@ window.addEventListener('keydown', (e) => {
     }
     if ((k === ' ' || e.code === 'Space') && pointerLocked) {
         if (world.grounded) {
-            // Jump: vh in current chart = parity * JUMP_VEL (so cover-vh is
-            // always +JUMP_VEL — the player always launches "upward" from
-            // their POV, regardless of which chart they're in).
-            world.vh = world.parity * JUMP_VEL;
+            world.vh = JUMP_VEL;            // cover-vh; always upward
             world.grounded = false;
         }
         e.preventDefault();
@@ -1890,20 +1879,17 @@ function setR(newR) {
     GLOBAL_R_UNIFORM.value = R;
     GLOBAL_L_UNIFORM.value = L;
     rValueEl.textContent = String(Math.round(R));
-    // Keep player u proportional to circumference (so the relative position
-    // along the strip stays the same as you scrub R).
-    world.u = (world.u * ratio) % L;
-    if (world.u < 0) world.u += L;
-    // Walkers: same.
+    // Keep cover-u proportional to circumference. Use period 2L (Fix B
+    // hygiene window) for the player and walkers; static entities keep their
+    // parity=+1 canonical [0, L).
+    const period2 = 2 * L;
+    world.u = ((world.u * ratio) % period2 + period2) % period2;
     for (const w of walkers) {
-        w.u = (w.u * ratio) % L;
-        if (w.u < 0) w.u += L;
+        w.u = ((w.u * ratio) % period2 + period2) % period2;
     }
-    // Static entities: scale u proportionally too.
     for (const e of entities) {
         if (e.kind === 'walker' || e.kind === 'player') continue;
-        e.u = (e.u * ratio) % L;
-        if (e.u < 0) e.u += L;
+        e.u = ((e.u * ratio) % L + L) % L;
     }
     updateRibbonGeometry(extrinsicView.ribbonGeo);
     updateEdgeBandGeometry(extrinsicView.edgeBandPos.geometry);
@@ -1955,9 +1941,13 @@ const coordsUEl    = document.getElementById('coordsU');
 const coordsVEl    = document.getElementById('coordsV');
 const coordsSideEl = document.getElementById('coordsSide');
 function updateCoordsReadout() {
-    coordsUEl.textContent = world.u.toFixed(0);
+    // Cover-u modulo L tells you "where on the strip" you are; floor(u/L)
+    // mod 2 tells you which lap-parity you're on (the "side" badge).
+    const uMod = ((world.u % L) + L) % L;
+    coordsUEl.textContent = uMod.toFixed(0);
     coordsVEl.textContent = world.v.toFixed(0);
-    if (world.parity > 0) {
+    const lapEven = (Math.floor(world.u / L) & 1) === 0;
+    if (lapEven) {
         coordsSideEl.textContent = 'side A';
         coordsSideEl.className = 'side A';
     } else {
@@ -1985,40 +1975,24 @@ function refreshSelectionHUD() {
 }
 
 // ===== Physics =====
+//
+// All quantities are in COVER directly. Gravity is −GRAVITY · dt on vh.
+// Jumping sets vh = +JUMP_VEL. Ground at h=0; platforms at h>0.
 function findHighestGroundUnder() {
-    // Ground is at h=0 always (in chart). Plus any platform whose footprint
-    // covers the player's (u, v) with platform top ≤ player.h + tolerance.
     let level = 0;
     for (const e of entities) {
         if (e.kind !== 'platform') continue;
-        const du = e.u - world.u;
-        const dv = e.v - world.v;
-        // Approximate by Euclidean distance in (u, v); the strip is flat.
-        // (For correctness we'd want to consider the wrap distance for u,
-        // but landings far from spawn are rare and the player's u stays
-        // close to platform u in normal play.)
-        const dist2 = du * du + dv * dv;
-        if (dist2 > e.footprintRadius * e.footprintRadius) continue;
-        const platTop = e.h + e.height;
-        // |h| comparison for which-side-of-ground; use signed because
-        // we're checking "platform top is at-or-below player's CURRENT h
-        // in this chart." With Fix A, platform.h is stored as-is (parity +1
-        // by convention), but the player's h is in the player's chart. To
-        // be in the same chart, multiply by parity:
-        //   platform.h_in_player_chart = world.parity * platTop_cov
-        // platform's cov_h = +1 * platTop = platTop (entities are stored
-        // with parity +1). So platform.h_in_player_chart = world.parity * platTop.
-        const platTopChart = world.parity * platTop;
-        // Player is "above" the platform top in the chart if h*parity >
-        // platTop_cov, i.e. cover_h_player > cover_h_platform_top.
-        // Equivalently in chart coords: world.parity * world.h >
-        // world.parity * platTopChart  →  world.h * world.parity >
-        // platTopChart * world.parity. Just compare in cover.
-        const playerCovH = world.parity * world.h;
-        const platTopCov = platTop;
-        if (platTopCov > level && platTopCov <= playerCovH + 0.02) {
-            level = platTopCov;
-        }
+        // Approximate footprint match by (du, dv) — strip is flat. Accounts
+        // for u-wrap by checking the closest cover-image of the platform.
+        const dvRaw = e.v - world.v;
+        const duRaw = e.u - world.u;
+        const nC = Math.round(duRaw / L);
+        const sign = (((nC % 2) + 2) % 2) === 0 ? 1 : -1;
+        const du = duRaw - nC * L;
+        const dv = sign * e.v - world.v;
+        if (du * du + dv * dv > e.footprintRadius * e.footprintRadius) continue;
+        const platTop = sign * e.h + e.height;
+        if (platTop > level && platTop <= world.h + 0.02) level = platTop;
     }
     return level;
 }
@@ -2030,78 +2004,61 @@ function integrate(dt) {
         pitchAccum = 0;
     }
 
-    // WASD movement, camera-relative. The character snap-rotates to the
-    // movement direction and walks in cover-aligned (u, v) space.
+    // WASD: snap player to camera-relative direction, then walk forward.
     const moveX = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
     const moveZ = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
     if (moveX !== 0 || moveZ !== 0) {
-        // Camera's cover-aligned bearing (uses cameraSurface's actual parity,
-        // which can differ from world.parity if the camera wrapped independently).
-        const csCovBeta = coverBeta(cameraSurface);
-        const cosCB = Math.cos(csCovBeta);
-        const sinCB = Math.sin(csCovBeta);
+        // Camera's cover-bearing (cameraSurface stores cover values directly).
+        const csBeta = cameraSurface.beta;
+        const cosCB = Math.cos(csBeta);
+        const sinCB = Math.sin(csBeta);
         // forward_cov = (cosCB, sinCB); right_cov = (sinCB, -cosCB).
-        // Move vector (in cover) = (-moveZ)·forward + moveX·right
-        //   (W gives moveZ=-1 → forward; D gives moveX=+1 → right).
+        // Move = (-moveZ)·forward + moveX·right.
         const dirU = -moveZ * cosCB + moveX * sinCB;
         const dirV = -moveZ * sinCB - moveX * cosCB;
         const dirLen = Math.sqrt(dirU * dirU + dirV * dirV);
         if (dirLen > 1e-6) {
-            // Snap player's chart-bearing to face the movement direction.
-            // newCovBeta is the cover-bearing; chart_beta = parity · cover_beta.
-            const newCovBeta = Math.atan2(dirV, dirU);
-            const newChartBeta = world.parity * newCovBeta;
+            const newBeta = Math.atan2(dirV, dirU);
             const oldBeta = world.beta;
-            world.beta = newChartBeta;
-            // Keep camera world-bearing fixed: cameraAzim absorbs the snap.
-            world.cameraAzim += (oldBeta - newChartBeta);
-            // Walk forward in the chart's bearing (cos, sin in chart give
-            // cover-direction once you rotate by parity — which cancels in
-            // x and self-cancels in y, so chart-walk == cover-walk for u,v).
+            world.beta = newBeta;
+            // Keep camera world-bearing fixed across the snap.
+            world.cameraAzim += (oldBeta - newBeta);
             world.u += WALK_SPEED * dt * Math.cos(world.beta);
             world.v += WALK_SPEED * dt * Math.sin(world.beta);
-            // Wrap. If parity flipped, also flip cameraAzim so the camera's
-            // cover-bearing is preserved (the camera doesn't swing around).
-            const wasParity = world.parity;
             normalize(world);
-            if (world.parity !== wasParity) world.cameraAzim = -world.cameraAzim;
         }
     }
 
-    // Vertical physics. Gravity in cover-vh terms is always -GRAVITY (cover);
-    // in chart-vh it's -world.parity * GRAVITY (chart).
-    const support = findHighestGroundUnder();        // cover-h of support
-    const playerCovH = world.parity * world.h;
+    // Vertical physics: cover gravity, ground/platform collision.
+    const support = findHighestGroundUnder();
     if (world.grounded) {
-        if (Math.abs(playerCovH - support) < 0.5) {
-            world.h = world.parity * support;        // stick (cover-h = support)
+        if (Math.abs(world.h - support) < 0.5) {
+            world.h = support;
         } else {
             world.grounded = false;
         }
     }
     if (!world.grounded) {
-        const prevCovH = world.parity * world.h;
-        const prevCovVh = world.parity * world.vh;
-        // Cover gravity acts on cover_vh.
-        const newCovVh = prevCovVh - GRAVITY * dt;
-        const newCovH  = prevCovH + newCovVh * dt;
-        world.h  = world.parity * newCovH;
-        world.vh = world.parity * newCovVh;
-        // Land detection (in cover).
+        const prevH = world.h;
+        world.vh -= GRAVITY * dt;
+        world.h += world.vh * dt;
         let landAt = -Infinity;
-        if (prevCovH >= 0 && newCovH <= 0 && newCovVh <= 0) landAt = 0;
+        if (prevH >= 0 && world.h <= 0 && world.vh <= 0) landAt = 0;
         for (const e of entities) {
             if (e.kind !== 'platform') continue;
-            const du = e.u - world.u;
-            const dv = e.v - world.v;
+            const duRaw = e.u - world.u;
+            const nC = Math.round(duRaw / L);
+            const sign = (((nC % 2) + 2) % 2) === 0 ? 1 : -1;
+            const du = duRaw - nC * L;
+            const dv = sign * e.v - world.v;
             if (du * du + dv * dv > e.footprintRadius * e.footprintRadius) continue;
-            const platTop = e.h + e.height;          // cover-h of top
-            if (prevCovH >= platTop - 0.01 && newCovH <= platTop && newCovVh <= 0) {
+            const platTop = sign * e.h + e.height;
+            if (prevH >= platTop - 0.01 && world.h <= platTop && world.vh <= 0) {
                 if (platTop > landAt) landAt = platTop;
             }
         }
         if (landAt > -Infinity) {
-            world.h = world.parity * landAt;
+            world.h = landAt;
             world.vh = 0;
             world.grounded = true;
         }
