@@ -135,6 +135,8 @@ const WALK_SPEED = 100.0;            // m/s — a brisk run
 const TURN_SPEED = 2.6;              // rad/s — A/D
 const GRAVITY = 250.0;               // m/s²
 const JUMP_VEL = 110.0;              // m/s
+const ORBIT_RADIUS = 80;             // third-person camera distance from player
+const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2)
 const GRID_N = 121;                  // ground patch resolution
 // Half-extent of the flat tangent-plane ground patch, in arc-meters. Large
 // enough that the patch boundary lands very close to the true horizon line
@@ -179,6 +181,7 @@ class Frame {
 }
 
 // ===== World state =====
+//   frame:        the player's SO(3) surface frame (their position + facing)
 //   pitch:        camera elevation around the player (mouse-Y)
 //   cameraAzim:   camera horizontal angle around the player (mouse-X)
 //   h, vh:        player height and vertical velocity
@@ -191,6 +194,35 @@ const world = {
     vh: 0,
     grounded: true
 };
+
+// The intrinsic view is a tangent plane centered NOT on the player but on
+// the camera's surface projection. This makes the player just another entity
+// at ~ORBIT_RADIUS·cos(pitch) from the origin; its wraps fall out of the
+// generic universal-cover code with zero special cases. Recomputed every
+// frame from world.frame + orbit parameters.
+const cameraSurfaceFrame = new Frame();
+const _camFrameTangentDir = new THREE.Vector3();
+const _camFrameRotAxis = new THREE.Vector3();
+function updateCameraSurfaceFrame() {
+    cameraSurfaceFrame.M.copy(world.frame.M);
+    const cosE = Math.cos(world.pitch);
+    const camHorizDist = ORBIT_RADIUS * cosE;
+    const angle = camHorizDist / R;
+    if (angle < 1e-6) return;
+    // Bearing in the player's tangent plane to the camera's surface point:
+    //   tangent +X = player.right, tangent +Z = -player.forward (Three.js).
+    //   bRight = sin(azim), bForward = -cos(azim) (so azim=0 → behind player).
+    const bRight = Math.sin(world.cameraAzim);
+    const bForward = -Math.cos(world.cameraAzim);
+    _camFrameTangentDir.set(0, 0, 0)
+        .addScaledVector(world.frame.right(),   bRight)
+        .addScaledVector(world.frame.forward(), bForward);
+    // Rotation axis from player.up toward the tangent direction.
+    _camFrameRotAxis.crossVectors(world.frame.up(), _camFrameTangentDir);
+    if (_camFrameRotAxis.lengthSq() < 1e-12) return;
+    _camFrameRotAxis.normalize();
+    cameraSurfaceFrame.rotateAround(_camFrameRotAxis, angle);
+}
 
 // ===== Entity helpers =====
 //
@@ -754,13 +786,6 @@ function makeExtrinsicView(canvas) {
     const sphere = buildExtrinsicSphere(R);
     scene.add(sphere);
 
-    // Player marker — built via the shared makePlayerMesh helper using the
-    // extrinsic embedding material so the player itself respects the
-    // per-vertex (R+h)/R stretching like every other entity.
-    const playerUniforms = createEntityUniforms();
-    const playerMarker = makePlayerMesh((c) => embeddingMaterial(c, playerUniforms));
-    scene.add(playerMarker);
-
     const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -834,21 +859,11 @@ function makeExtrinsicView(canvas) {
         camera.updateProjectionMatrix();
     }
 
-    function render(world) {
-        if (world) {
-            // Player marker: push frame to the embedding-shader uniforms.
-            // uMeshX = world.right, uObjectUp = world.up, uMeshZ = -world.forward
-            // (mesh local +Z = back of player, since eyes face mesh -Z).
-            const u = world.frame.up();
-            playerUniforms.uObjectUp.value.copy(u);
-            playerUniforms.uMeshX.value.copy(world.frame.right());
-            playerUniforms.uMeshZ.value.copy(world.frame.forward()).multiplyScalar(-1);
-            playerUniforms.uObjectH.value = 0;
-        }
+    function render() {
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, sphere, playerMarker, playerUniforms, orbit, applyOrbit, resize, render };
+    return { scene, camera, renderer, sphere, orbit, applyOrbit, resize, render };
 }
 
 // ===== Intrinsic view: standard Three.js camera looking at a flat plane.
@@ -861,28 +876,6 @@ function makeIntrinsicView(canvas) {
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
 
-    // The player lives at the origin of the tangent frame (the player IS the
-    // reference). Standard Three.js material — this is just a flat scene.
-    const playerMesh = makePlayerMesh(basicMaterial);
-    scene.add(playerMesh);
-
-    // Universal cover for the player. Unlike a normal entity (whose preimages
-    // lie along the unique great circle through both player and entity), the
-    // player is at distance 0 from themselves — every great circle through the
-    // player is "self-connecting", so preimages exist in every direction at
-    // every multiple of 2π·R. Sample 8 directions × a few wraps; this is the
-    // sphere analog of the 2D prototype's universal cover, where the loop ran
-    // over a discrete set of n. Pre-allocate, hide unused per frame.
-    const PLAYER_WRAP_DIRS = 8;     // ring resolution
-    const PLAYER_MAX_COPIES = 32;   // ~ 4 wraps × 8 directions
-    const playerCopies = [];
-    for (let i = 0; i < PLAYER_MAX_COPIES; i++) {
-        const c = makePlayerMesh(basicMaterial);
-        c.visible = false;
-        playerCopies.push(c);
-        scene.add(c);
-    }
-
     const camera = new THREE.PerspectiveCamera(70, 1, 0.1, GRID_HALF_ARC * 4);
     camera.rotation.order = 'YXZ';
 
@@ -890,55 +883,29 @@ function makeIntrinsicView(canvas) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(0x000000, 0);
 
-    // Third-person orbit. Mouse-X = world.cameraAzim (horizontal angle around
-    // the player). Mouse-Y = world.pitch (elevation). The camera tracks the
-    // player vertically as they jump.
-    const PLAYER_CENTER_Y = PLAYER_H * 0.5;
-    const ORBIT_RADIUS = 80;
-
+    // Third-person camera. The tangent plane is now centered on the camera's
+    // surface projection (see updateCameraSurfaceFrame), so the camera lives
+    // at the tangent origin (horizontal=0,0) at its world height. The player
+    // is just another entity in the scene; the camera looks at the player's
+    // tangent position.
     const _lookTarget = new THREE.Vector3();
+    const _playerTangentTmp = new THREE.Vector3();
 
     function placeCamera(world) {
-        const elev = world.pitch;
-        const azim = world.cameraAzim;
-        const cosE = Math.cos(elev), sinE = Math.sin(elev);
-        const cosA = Math.cos(azim), sinA = Math.sin(azim);
-        const focusY = world.h + PLAYER_CENTER_Y;
-        camera.position.set(
-            ORBIT_RADIUS * cosE * sinA,
-            focusY + ORBIT_RADIUS * sinE,
-            ORBIT_RADIUS * cosE * cosA
-        );
+        const cameraHeight = world.h + PLAYER_CENTER_Y + ORBIT_RADIUS * Math.sin(world.pitch);
+        camera.position.set(0, cameraHeight, 0);
         camera.up.set(0, 1, 0);
-        _lookTarget.set(0, focusY, 0);
+        // Aim at the player's tangent position (which is no longer the origin).
+        projectToTangent(world.frame.up(), world.h, cameraSurfaceFrame, _playerTangentTmp);
+        _lookTarget.set(_playerTangentTmp.x, _playerTangentTmp.y + PLAYER_CENTER_Y, _playerTangentTmp.z);
         camera.lookAt(_lookTarget);
     }
 
-    function updatePlayerWrapCopies() {
-        playerMesh.position.y = world.h;
-        const C = 2 * Math.PI * R;
-        const farLimit = camera.far;
-        let copyIdx = 0;
-        for (let n = 1; copyIdx < playerCopies.length; n++) {
-            const arc = n * C;
-            if (arc > farLimit) break;
-            for (let d = 0; d < PLAYER_WRAP_DIRS && copyIdx < playerCopies.length; d++) {
-                const theta = (d / PLAYER_WRAP_DIRS) * Math.PI * 2;
-                const c = playerCopies[copyIdx++];
-                c.visible = true;
-                c.position.set(arc * Math.sin(theta), world.h, arc * Math.cos(theta));
-            }
-        }
-        for (let i = copyIdx; i < playerCopies.length; i++) {
-            playerCopies[i].visible = false;
-        }
-    }
-
-    function updateGroundUniforms(world) {
+    function updateGroundUniforms() {
         const u = ground.material.uniforms;
-        u.uPlayerRight.value.copy(world.frame.right());
-        u.uPlayerForward.value.copy(world.frame.forward());
-        u.uPlayerUp.value.copy(world.frame.up());
+        u.uPlayerRight.value.copy(cameraSurfaceFrame.right());
+        u.uPlayerForward.value.copy(cameraSurfaceFrame.forward());
+        u.uPlayerUp.value.copy(cameraSurfaceFrame.up());
     }
 
     function resize() {
@@ -951,13 +918,12 @@ function makeIntrinsicView(canvas) {
     }
 
     function render(world) {
-        updateGroundUniforms(world);
-        updatePlayerWrapCopies();
+        updateGroundUniforms();
         placeCamera(world);
         renderer.render(scene, camera);
     }
 
-    return { scene, camera, renderer, ground, playerMesh, resize, render };
+    return { scene, camera, renderer, ground, resize, render };
 }
 
 // ===== Bootstrap =====
@@ -988,7 +954,7 @@ function addEntity(e) {
     entities.push(e);
     if (e.kind === 'walker') {
         walkers.push(e);
-    } else {
+    } else if (e.kind !== 'player') {
         e.staticFrame = computeStaticMeshFrame(e.upWorld);
     }
     // Universal cover. Light from the entity reaches the player along
@@ -1008,6 +974,24 @@ function addEntity(e) {
         intrinsicView.scene.add(clone);
     }
     extrinsicView.scene.add(e.extrinsicMesh);
+}
+
+// The player character — added as a regular entity. Its frame, h, and
+// derived properties are live: e.frame === world.frame, e.upWorld and e.h
+// are getters returning the current world state. Universal-cover wraps and
+// orientation tracking are handled by the same updateEntities loop that
+// runs for every other entity.
+{
+    const playerUniforms = createEntityUniforms();
+    addEntity({
+        kind: 'player',
+        intrinsicMesh: makePlayerMesh(basicMaterial),
+        extrinsicMesh: makePlayerMesh((c) => embeddingMaterial(c, playerUniforms)),
+        entityUniforms: playerUniforms,
+        frame: world.frame,
+        get upWorld() { return world.frame.up(); },
+        get h()       { return world.h; }
+    });
 }
 
 // Walkers wander on great circles. Spread out compared to v0.x so the
@@ -1052,17 +1036,20 @@ function updateEntities(dt) {
         }
     }
 
-    const pR = world.frame.right();
-    const pU = world.frame.up();
-    const pF = world.frame.forward();
+    // Project everything from the CAMERA's surface frame, not the player's.
+    // This collapses what used to be "the player is at distance 0 from
+    // themselves so the wrap math is degenerate" — the player is now an
+    // ordinary entity at finite distance from the tangent origin.
+    const pR = cameraSurfaceFrame.right();
+    const pU = cameraSurfaceFrame.up();
+    const pF = cameraSurfaceFrame.forward();
     const C = 2 * Math.PI * R;                     // circumference of a great circle
     const farLimit = intrinsicView.camera.far;     // beyond this the preimage is clipped
 
     for (const e of entities) {
-        const isWalker = (e.kind === 'walker');
-
-        // Capture entity world axes (frame.up() etc. mutate caches).
-        if (isWalker) {
+        // Capture entity world axes. frame may be the player's world frame,
+        // a walker's own frame, or a static spawn-time frame.
+        if (e.frame) {
             _eR.copy(e.frame.right());
             _eU.copy(e.frame.up());
             _eF.copy(e.frame.forward());
@@ -1094,10 +1081,11 @@ function updateEntities(dt) {
         }
         _entMat.makeBasis(_entXt, _entYt, _entZt);
 
-        // Intrinsic: project the entity's surface point to the player's
-        // tangent frame, then enumerate preimages of the entity along every
-        // great circle through it. Each is a real geodesic image, not a copy.
-        projectToTangent(_eU, e.h, world.frame, _entityPos);
+        // Intrinsic: project the entity's surface point to the camera's
+        // tangent frame, then enumerate preimages along the unique great
+        // circle through camera-surface and entity-surface. Each preimage is
+        // a real geodesic image.
+        projectToTangent(_eU, e.h, cameraSurfaceFrame, _entityPos);
         const xL = _entityPos.x;
         const yL = _entityPos.y;
         const zL = _entityPos.z;
@@ -1337,10 +1325,11 @@ function loop(now) {
     if (dt > 0.05) dt = 0.05;  // clamp on tab-switch / first frame
     integrate(dt);
     world.frame.tick();
+    updateCameraSurfaceFrame();
     updateEntities(dt);
     updateCoordsReadout();
     intrinsicView.render(world);
-    extrinsicView.render(world);
+    extrinsicView.render();
     requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
