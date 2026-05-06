@@ -117,7 +117,8 @@
 <script type="importmap">
 {
     "imports": {
-        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+        "three":         "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
     }
 }
 </script>
@@ -126,6 +127,7 @@
 'use strict';
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ===== Constants =====
 let   R = 500.0;                     // mutable: the R slider rebinds it live
@@ -425,6 +427,34 @@ function basicMaterial(color) {
     return new THREE.MeshBasicMaterial({ color });
 }
 
+// Merge several pieces of an entity into one BufferGeometry with per-vertex
+// colors. Each part is { geo, color, position?, rotationX/Y/Z?, scale? }.
+// Used for the INTRINSIC side of multi-piece entities so each preimage is a
+// single draw call instead of one per child mesh.
+function mergeWithColors(parts) {
+    const geos = parts.map(p => {
+        const g = p.geo.clone();
+        if (p.scale)     g.scale(p.scale.x, p.scale.y, p.scale.z);
+        if (p.rotationX) g.rotateX(p.rotationX);
+        if (p.rotationY) g.rotateY(p.rotationY);
+        if (p.rotationZ) g.rotateZ(p.rotationZ);
+        if (p.position)  g.translate(p.position.x, p.position.y, p.position.z);
+        const n = g.attributes.position.count;
+        const colors = new Float32Array(n * 3);
+        const c = new THREE.Color(p.color);
+        for (let i = 0; i < n; i++) {
+            colors[i * 3]     = c.r;
+            colors[i * 3 + 1] = c.g;
+            colors[i * 3 + 2] = c.b;
+        }
+        g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        return g;
+    });
+    return mergeGeometries(geos, false);
+}
+
+const VC_MATERIAL = new THREE.MeshBasicMaterial({ vertexColors: true });
+
 const EXTRINSIC_FRAGMENT_SHADER = `
     precision highp float;
     varying vec3 vWorldPos;
@@ -573,39 +603,48 @@ const PLAYER_W = 22;
 const PLAYER_H = 30;
 const PLAYER_BELT_COLOR = 0x7a2848;
 
-function makePlayerMesh(materialFor) {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(PLAYER_W, PLAYER_H, PLAYER_W),
-        materialFor(PLAYER_COLOR)
-    );
-    body.position.y = PLAYER_H / 2;
-    g.add(body);
-    const beltH = 1.5;
-    const belt = new THREE.Mesh(
-        new THREE.BoxGeometry(PLAYER_W + 0.2, beltH, PLAYER_W + 0.2),
-        materialFor(PLAYER_BELT_COLOR)
-    );
-    belt.position.y = PLAYER_H * 0.6;
-    g.add(belt);
-    const eyeGeo = new THREE.BoxGeometry(4, 5, 0.4);
-    const pupilGeo = new THREE.BoxGeometry(2, 3, 0.2);
+function playerParts() {
     const eyeY = PLAYER_H * 0.75;
     const eyeZ = -PLAYER_W / 2 - 0.1;
+    const parts = [
+        { geo: new THREE.BoxGeometry(PLAYER_W, PLAYER_H, PLAYER_W),
+          color: PLAYER_COLOR,
+          position: { x: 0, y: PLAYER_H / 2, z: 0 } },
+        { geo: new THREE.BoxGeometry(PLAYER_W + 0.2, 1.5, PLAYER_W + 0.2),
+          color: PLAYER_BELT_COLOR,
+          position: { x: 0, y: PLAYER_H * 0.6, z: 0 } },
+    ];
+    const eyeGeo = new THREE.BoxGeometry(4, 5, 0.4);
+    const pupilGeo = new THREE.BoxGeometry(2, 3, 0.2);
     for (const sx of [-1, 1]) {
-        const eye = new THREE.Mesh(eyeGeo, materialFor(0xffffff));
-        eye.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ);
-        g.add(eye);
-        const pupil = new THREE.Mesh(pupilGeo, materialFor(0x000000));
-        pupil.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ - 0.3);
-        g.add(pupil);
+        parts.push({ geo: eyeGeo, color: 0xffffff,
+                     position: { x: sx * PLAYER_W * 0.2, y: eyeY, z: eyeZ } });
+        parts.push({ geo: pupilGeo, color: 0x000000,
+                     position: { x: sx * PLAYER_W * 0.2, y: eyeY, z: eyeZ - 0.3 } });
     }
-    // One-pixel back-marker so you can tell which side is the back.
-    const buttGeo = new THREE.BoxGeometry(1, 1, 0.2);
-    const butt = new THREE.Mesh(buttGeo, materialFor(0x000000));
-    butt.position.set(0, PLAYER_H * 0.35, PLAYER_W / 2 + 0.1);
-    g.add(butt);
+    parts.push({ geo: new THREE.BoxGeometry(1, 1, 0.2),
+                 color: 0x000000,
+                 position: { x: 0, y: PLAYER_H * 0.35, z: PLAYER_W / 2 + 0.1 } });
+    return parts;
+}
+
+// EXTRINSIC build: Group of separate Meshes so each child carries its own
+// embedding-shader material. The cost (~7 draw calls per player) is paid
+// only once per entity in the extrinsic view, no preimages.
+function makePlayerMeshExtrinsic(materialFor) {
+    const g = new THREE.Group();
+    for (const p of playerParts()) {
+        const m = new THREE.Mesh(p.geo, materialFor(p.color));
+        m.position.set(p.position.x, p.position.y, p.position.z);
+        g.add(m);
+    }
     return g;
+}
+
+// INTRINSIC build: one merged BufferGeometry with vertex colors. Each
+// preimage is a single draw call regardless of how many parts.
+function makePlayerMeshIntrinsic() {
+    return new THREE.Mesh(mergeWithColors(playerParts()), VC_MATERIAL);
 }
 
 // ===== Entity factories =====
@@ -668,31 +707,30 @@ function makeWalker(color, walkSpeed, upWorld, forwardHint) {
 function makeTree(upWorld) {
     const TRUNK_W = 14;
     const TRUNK_H = 40;
-    const trunkGeo = new THREE.BoxGeometry(TRUNK_W, TRUNK_H, TRUNK_W);
-    const canopyMainGeo = new THREE.SphereGeometry(28, 24, 16);
-    const canopy2Geo = new THREE.SphereGeometry(18, 18, 14);
-    const canopy3Geo = new THREE.SphereGeometry(16, 18, 14);
-    const make = (matFor) => {
+    const parts = [
+        { geo: new THREE.BoxGeometry(TRUNK_W, TRUNK_H, TRUNK_W),
+          color: COLOR_TRUNK, position: { x: 0, y: TRUNK_H / 2, z: 0 } },
+        { geo: new THREE.SphereGeometry(28, 24, 16),
+          color: COLOR_CANOPY, position: { x: 0, y: 80, z: 0 } },
+        { geo: new THREE.SphereGeometry(18, 18, 14),
+          color: COLOR_CANOPY_LIGHT, position: { x: -10, y: 88, z: 0 } },
+        { geo: new THREE.SphereGeometry(16, 18, 14),
+          color: COLOR_CANOPY_LIGHT, position: { x: 12, y: 84, z: 0 } }
+    ];
+    const makeExtrinsic = (matFor) => {
         const g = new THREE.Group();
-        const trunk = new THREE.Mesh(trunkGeo, matFor(COLOR_TRUNK));
-        trunk.position.y = TRUNK_H / 2;
-        g.add(trunk);
-        const canopy = new THREE.Mesh(canopyMainGeo, matFor(COLOR_CANOPY));
-        canopy.position.y = 80;
-        g.add(canopy);
-        const canopy2 = new THREE.Mesh(canopy2Geo, matFor(COLOR_CANOPY_LIGHT));
-        canopy2.position.set(-10, 88, 0);
-        g.add(canopy2);
-        const canopy3 = new THREE.Mesh(canopy3Geo, matFor(COLOR_CANOPY_LIGHT));
-        canopy3.position.set(12, 84, 0);
-        g.add(canopy3);
+        for (const p of parts) {
+            const m = new THREE.Mesh(p.geo, matFor(p.color));
+            m.position.set(p.position.x, p.position.y, p.position.z);
+            g.add(m);
+        }
         return g;
     };
     const entityUniforms = createEntityUniforms();
     return {
         kind: 'tree',
-        intrinsicMesh: make(basicMaterial),
-        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        intrinsicMesh: new THREE.Mesh(mergeWithColors(parts), VC_MATERIAL),
+        extrinsicMesh: makeExtrinsic((c) => embeddingMaterial(c, entityUniforms)),
         entityUniforms,
         upWorld,
         h: 0
@@ -701,29 +739,35 @@ function makeTree(upWorld) {
 
 function makeSmiley(upWorld, h) {
     const RR = 25;
-    const sphereGeo = new THREE.SphereGeometry(RR, 32, 24);
+    const z = -RR * 0.92;
     const eyeGeo = new THREE.SphereGeometry(RR * 0.13, 12, 8);
-    const mouthGeo = new THREE.TorusGeometry(RR * 0.45, RR * 0.06, 8, 24, Math.PI);
-    const make = (matFor) => {
+    const parts = [
+        { geo: new THREE.SphereGeometry(RR, 32, 24),
+          color: COLOR_SMILEY, position: { x: 0, y: 0, z: 0 } },
+        { geo: eyeGeo, color: COLOR_SMILEY_DARK,
+          position: { x: -RR * 0.32, y: RR * 0.20, z } },
+        { geo: eyeGeo, color: COLOR_SMILEY_DARK,
+          position: { x:  RR * 0.32, y: RR * 0.20, z } },
+        { geo: new THREE.TorusGeometry(RR * 0.45, RR * 0.06, 8, 24, Math.PI),
+          color: COLOR_SMILEY_DARK,
+          position: { x: 0, y: -RR * 0.10, z: z * 0.97 },
+          rotationZ: Math.PI }
+    ];
+    const makeExtrinsic = (matFor) => {
         const g = new THREE.Group();
-        g.add(new THREE.Mesh(sphereGeo, matFor(COLOR_SMILEY)));
-        const z = -RR * 0.92;
-        for (const sx of [-1, 1]) {
-            const eye = new THREE.Mesh(eyeGeo, matFor(COLOR_SMILEY_DARK));
-            eye.position.set(sx * RR * 0.32, RR * 0.20, z);
-            g.add(eye);
+        for (const p of parts) {
+            const m = new THREE.Mesh(p.geo, matFor(p.color));
+            m.position.set(p.position.x, p.position.y, p.position.z);
+            if (p.rotationZ) m.rotation.z = p.rotationZ;
+            g.add(m);
         }
-        const mouth = new THREE.Mesh(mouthGeo, matFor(COLOR_SMILEY_DARK));
-        mouth.position.set(0, -RR * 0.10, z * 0.97);
-        mouth.rotation.z = Math.PI;
-        g.add(mouth);
         return g;
     };
     const entityUniforms = createEntityUniforms();
     return {
         kind: 'smiley',
-        intrinsicMesh: make(basicMaterial),
-        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        intrinsicMesh: new THREE.Mesh(mergeWithColors(parts), VC_MATERIAL),
+        extrinsicMesh: makeExtrinsic((c) => embeddingMaterial(c, entityUniforms)),
         entityUniforms,
         upWorld,
         h
@@ -736,21 +780,29 @@ function makeStripedPole(upWorld) {
     const N_BANDS = POLE_COLORS.length;
     const BAND_H = TOTAL_H / N_BANDS;
     const bandGeo = new THREE.BoxGeometry(POLE_W, BAND_H, POLE_W);
-    const make = (matFor) => {
+    const parts = [];
+    for (let i = 0; i < N_BANDS; i++) {
+        parts.push({
+            geo: bandGeo,
+            color: POLE_COLORS[i],
+            position: { x: 0, y: i * BAND_H + BAND_H / 2, z: 0 }
+        });
+    }
+    const makeExtrinsic = (matFor) => {
         const g = new THREE.Group();
-        for (let i = 0; i < N_BANDS; i++) {
-            const band = new THREE.Mesh(bandGeo, matFor(POLE_COLORS[i]));
-            band.position.y = i * BAND_H + BAND_H / 2;
-            g.add(band);
+        for (const p of parts) {
+            const m = new THREE.Mesh(p.geo, matFor(p.color));
+            m.position.set(p.position.x, p.position.y, p.position.z);
+            g.add(m);
         }
         return g;
     };
     const entityUniforms = createEntityUniforms();
     return {
         kind: 'pole',
-        intrinsicMesh: make(basicMaterial),
+        intrinsicMesh: new THREE.Mesh(mergeWithColors(parts), VC_MATERIAL),
         // The embedding shader handles per-vertex scaling; no per-band hack.
-        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        extrinsicMesh: makeExtrinsic((c) => embeddingMaterial(c, entityUniforms)),
         entityUniforms,
         upWorld,
         h: 0
@@ -760,23 +812,28 @@ function makeStripedPole(upWorld) {
 function makePlatform(upWorld, h, width, depth, height) {
     const baseH = height * 0.82;
     const topH = height - baseH;
-    const baseGeo = new THREE.BoxGeometry(width, baseH, depth);
-    const topGeo = new THREE.BoxGeometry(width, topH, depth);
-    const make = (matFor) => {
+    const parts = [
+        { geo: new THREE.BoxGeometry(width, baseH, depth),
+          color: COLOR_PLATFORM_BASE,
+          position: { x: 0, y: baseH / 2, z: 0 } },
+        { geo: new THREE.BoxGeometry(width, topH, depth),
+          color: COLOR_PLATFORM_TOP,
+          position: { x: 0, y: baseH + topH / 2, z: 0 } }
+    ];
+    const makeExtrinsic = (matFor) => {
         const g = new THREE.Group();
-        const base = new THREE.Mesh(baseGeo, matFor(COLOR_PLATFORM_BASE));
-        base.position.y = baseH / 2;
-        g.add(base);
-        const top = new THREE.Mesh(topGeo, matFor(COLOR_PLATFORM_TOP));
-        top.position.y = baseH + topH / 2;
-        g.add(top);
+        for (const p of parts) {
+            const m = new THREE.Mesh(p.geo, matFor(p.color));
+            m.position.set(p.position.x, p.position.y, p.position.z);
+            g.add(m);
+        }
         return g;
     };
     const entityUniforms = createEntityUniforms();
     return {
         kind: 'platform',
-        intrinsicMesh: make(basicMaterial),
-        extrinsicMesh: make((c) => embeddingMaterial(c, entityUniforms)),
+        intrinsicMesh: new THREE.Mesh(mergeWithColors(parts), VC_MATERIAL),
+        extrinsicMesh: makeExtrinsic((c) => embeddingMaterial(c, entityUniforms)),
         entityUniforms,
         upWorld,
         h,
@@ -951,11 +1008,38 @@ resizeAll();
 const entities = [];
 const walkers = [];
 
-// Maximum number of preimages of an entity rendered per frame (universal
-// cover). For R = 100 (smallest) and far = 12000 the geodesic enumeration
-// admits up to ~2 × 12000 / (2π·100) ≈ 38 preimages. 40 covers it; for
-// larger R most are clipped by the camera far plane and stay hidden.
+// Hard upper cap on the universal-cover preimage count per entity. The
+// actual count used per frame is `maxPreimagesForR(R)` — which scales
+// down as R grows. At R=2000 we only need ~2; at R=100 we need ~39.
 const MAX_PREIMAGES = 40;
+
+function maxPreimagesForR(r) {
+    const C = 2 * Math.PI * r;
+    // Far limit ≈ GRID_HALF_ARC * 4 = 12000 (intrinsic camera far plane).
+    // 2× covers forward + backward direction; +2 for safety/mid-frame R changes.
+    return Math.min(MAX_PREIMAGES, Math.ceil(2 * 12000 / C) + 2);
+}
+
+function fitCloneCount(e, target) {
+    const have = e.intrinsicCopies.length;
+    if (target === have) return;
+    if (target > have) {
+        // Grow: clone the canonical mesh and add to the scene.
+        for (let i = have; i < target; i++) {
+            const clone = e.intrinsicMesh.clone(true);
+            clone.visible = false;
+            e.intrinsicCopies.push(clone);
+            intrinsicView.scene.add(clone);
+        }
+    } else {
+        // Shrink: remove extras from the scene.
+        for (let i = have - 1; i >= target; i--) {
+            const c = e.intrinsicCopies[i];
+            intrinsicView.scene.remove(c);
+            e.intrinsicCopies.length = target;
+        }
+    }
+}
 
 function addEntity(e) {
     entities.push(e);
@@ -968,18 +1052,15 @@ function addEntity(e) {
     // every great circle through it: the primary geodesic, the antipodal
     // (long-way-around), and then wraps of both. Each path is a real
     // geodesic in S²×ℝ, so the entity legitimately appears at every
-    // preimage tangent-plane position. We pre-allocate clones and toggle
-    // visibility per frame based on which preimages fall in the camera's
-    // far plane — same algorithm as the 2D prototype's intrinsic
-    // renderer at index.html:364-392, extended from 1D bearings to 2D.
+    // preimage tangent-plane position. We allocate exactly the number of
+    // clones the current R could ever make visible — far fewer than the
+    // hard cap MAX_PREIMAGES at typical R — and grow/shrink the array as
+    // the slider moves. (Hidden Object3Ds are still walked by the
+    // renderer for matrix update / frustum culling, so keeping the count
+    // tight matters.)
     e.intrinsicCopies = [e.intrinsicMesh];
     intrinsicView.scene.add(e.intrinsicMesh);
-    for (let i = 1; i < MAX_PREIMAGES; i++) {
-        const clone = e.intrinsicMesh.clone(true);
-        clone.visible = false;
-        e.intrinsicCopies.push(clone);
-        intrinsicView.scene.add(clone);
-    }
+    fitCloneCount(e, maxPreimagesForR(R));
     extrinsicView.scene.add(e.extrinsicMesh);
 }
 
@@ -992,8 +1073,8 @@ function addEntity(e) {
     const playerUniforms = createEntityUniforms();
     addEntity({
         kind: 'player',
-        intrinsicMesh: makePlayerMesh(basicMaterial),
-        extrinsicMesh: makePlayerMesh((c) => embeddingMaterial(c, playerUniforms)),
+        intrinsicMesh: makePlayerMeshIntrinsic(),
+        extrinsicMesh: makePlayerMeshExtrinsic((c) => embeddingMaterial(c, playerUniforms)),
         entityUniforms: playerUniforms,
         frame: world.frame,
         get upWorld() { return world.frame.up(); },
@@ -1098,6 +1179,7 @@ function updateEntities(dt) {
         const zL = _entityPos.z;
         const s = Math.sqrt(xL * xL + zL * zL);
 
+        const cap = e.intrinsicCopies.length;
         let copyIdx = 0;
         if (s < 1e-3) {
             // Player is at the entity's surface position — only one preimage
@@ -1109,7 +1191,7 @@ function updateEntities(dt) {
             copyIdx = 1;
         } else {
             // Forward wraps: arc = s + n·C, same bearing β.
-            for (let n = 0; copyIdx < MAX_PREIMAGES; n++) {
+            for (let n = 0; copyIdx < cap; n++) {
                 const arc = s + n * C;
                 if (arc > farLimit) break;
                 const scale = arc / s;
@@ -1119,7 +1201,7 @@ function updateEntities(dt) {
                 c.quaternion.setFromRotationMatrix(_entMat);
             }
             // Backward wraps: arc = (n+1)·C − s, bearing β + π (opposite direction).
-            for (let n = 0; copyIdx < MAX_PREIMAGES; n++) {
+            for (let n = 0; copyIdx < cap; n++) {
                 const arc = (n + 1) * C - s;
                 if (arc > farLimit) break;
                 const scale = arc / s;
@@ -1208,6 +1290,10 @@ function setR(newR) {
     extrinsicView.camera.far = R * 50;
     extrinsicView.camera.updateProjectionMatrix();
     extrinsicView.applyOrbit();
+    // Re-fit each entity's clone array to the number of preimages this R
+    // can actually make visible. Most R values need far fewer than the cap.
+    const target = maxPreimagesForR(R);
+    for (const e of entities) fitCloneCount(e, target);
 }
 
 // ===== Coordinate readout =====
