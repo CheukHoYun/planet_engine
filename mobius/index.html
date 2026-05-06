@@ -276,7 +276,7 @@ let   L = 2 * Math.PI * R;          // derived: circumference of the centerline
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 100.0;           // m/s
 const GRAVITY    = 250.0;           // m/s²
-const JUMP_VEL   = 145.0;           // m/s
+const JUMP_VEL   = 220.0;           // m/s
 let   ORBIT_RADIUS = 80;            // third-person camera distance (mouse wheel)
 const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
@@ -1712,14 +1712,11 @@ function addEntity(e) {
     addEntity(blue);
 }
 
-// Triangle of landmarks around spawn. The signpost is the asymmetry-demo
-// piece — walk past it on an odd preimage and its text reads mirrored.
-addEntity(makeSignpost(60, +10, 'FORWARD'));
-addEntity(makeTree(120, -30));
+// Striped pole + two platforms + a small smiley next to the upper pole.
 addEntity(makeStripedPole(220, +30));
 addEntity(makePlatform(330, -25, 0, 50, 50, 22));
 addEntity(makePlatform(420, +20, 50, 60, 60, 22));
-addEntity(makeSmiley(350, -30, 130, 30));
+addEntity(makeSmiley(220, +5, 220, 12));
 
 // Scratch.
 const _entityPos = new THREE.Vector3();
