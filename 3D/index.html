@@ -613,18 +613,22 @@ const POLE_COLOR_GLSL = `
     // Overlay an N/S letter onto a unit-vector direction. CAP is the half-
     // width (in unit-sphere coords) used as the letter UV scale.
     vec3 applyPolarLetters(vec3 color, vec3 n) {
-        const float CAP = 0.30;
+        // Sized to fit inside the innermost latitude grid circle.
+        // The shader draws a latitude line every pi/20 rad; the nearest line
+        // to the pole sits at radius sin(pi/20) ≈ 0.156 on the (x,z) plane.
+        // CAP=0.13 keeps the letter strictly inside that circle.
+        const float CAP = 0.13;
         if (n.y > 1.0 - CAP * CAP) {
-            vec2 luv = vec2(n.x, n.z) / CAP;
+            // Flip X so 'N' reads upright when viewed from outside the sphere.
+            vec2 luv = vec2(-n.x, n.z) / CAP;
             if (max(abs(luv.x), abs(luv.y)) < 1.15) {
-                float stroke = smoothstep(0.18, 0.12, letterN(luv));
+                float stroke = smoothstep(0.30, 0.20, letterN(luv));
                 color = mix(color, vec3(0.97), stroke);
             }
         } else if (n.y < -(1.0 - CAP * CAP)) {
-            // Flip Z so 'S' reads upright when viewed from outside the sphere.
-            vec2 luv = vec2(n.x, -n.z) / CAP;
+            vec2 luv = vec2(n.x, n.z) / CAP;
             if (max(abs(luv.x), abs(luv.y)) < 1.15) {
-                float stroke = smoothstep(0.18, 0.12, letterS(luv));
+                float stroke = smoothstep(0.30, 0.20, letterS(luv));
                 color = mix(color, vec3(0.97), stroke);
             }
         }
