@@ -640,6 +640,18 @@ function playerParts() {
     parts.push({ geo: new THREE.BoxGeometry(1, 1, 0.2),
                  color: 0x000000,
                  position: { x: 0, y: PLAYER_H * 0.35, z: PLAYER_W / 2 + 0.1 } });
+    // L-shaped arms (dark pink) — upper arm down from shoulder, forearm
+    // bending forward at the elbow. Visible from any angle, breaks the
+    // mirror symmetry so it's easy to tell the character's facing.
+    const upperArmGeo = new THREE.BoxGeometry(2, 6, 2);
+    const forearmGeo  = new THREE.BoxGeometry(2, 2, 5);
+    const armX = PLAYER_W / 2 + 1;
+    for (const sx of [-1, 1]) {
+        parts.push({ geo: upperArmGeo, color: PLAYER_BELT_COLOR,
+                     position: { x: sx * armX, y: PLAYER_H * 0.6, z: 0 } });
+        parts.push({ geo: forearmGeo,  color: PLAYER_BELT_COLOR,
+                     position: { x: sx * armX, y: PLAYER_H * 0.45, z: -3 } });
+    }
     return parts;
 }
 
