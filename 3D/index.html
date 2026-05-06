@@ -99,6 +99,7 @@
 <div id="controls">
     <label>R: <input id="rSlider" type="range" min="100" max="2000" value="500" disabled><span id="rValue">500</span></label>
     <label>View: <input id="farSlider" type="range" min="200" max="12000" value="12000" step="50" disabled><span id="farValue">12000</span></label>
+    <label>Walker h: <input id="walkerHSlider" type="range" min="0" max="400" value="0" step="1" disabled><span id="walkerHValue">0</span></label>
     <span id="coords">θ 0.0° &nbsp; φ 0.0°</span>
     <span id="helpText">Click left to lock · W/S walk · A/D turn · Mouse: orbit camera · Space: jump · Drag right to orbit · Wheel zoom</span>
 </div>
@@ -869,15 +870,21 @@ function makeExtrinsicView(canvas) {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    // Orbit state
+    // Orbit state. `target` is the lookAt point — origin by default; middle-
+    // click pans it sideways/up so you can frame the view off-center.
     const orbit = {
         azimuth: 0.6,
         elevation: 0.4,
         radius: R * 2.5,
-        dragging: false,
+        target: new THREE.Vector3(0, 0, 0),
+        mode: null,        // 'orbit' | 'pan' | null
         lastX: 0,
         lastY: 0
     };
+
+    const _camRight = new THREE.Vector3();
+    const _camUp = new THREE.Vector3();
+    const _camForward = new THREE.Vector3();
 
     function applyOrbit() {
         const ce = Math.cos(orbit.elevation);
@@ -885,41 +892,55 @@ function makeExtrinsicView(canvas) {
         const ca = Math.cos(orbit.azimuth);
         const sa = Math.sin(orbit.azimuth);
         camera.position.set(
-            orbit.radius * ce * sa,
-            orbit.radius * se,
-            orbit.radius * ce * ca
+            orbit.target.x + orbit.radius * ce * sa,
+            orbit.target.y + orbit.radius * se,
+            orbit.target.z + orbit.radius * ce * ca
         );
-        camera.lookAt(0, 0, 0);
+        camera.lookAt(orbit.target);
     }
     applyOrbit();
 
     canvas.style.cursor = 'grab';
     canvas.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0) return;
-        orbit.dragging = true;
+        if (e.button === 0)      orbit.mode = 'orbit';
+        else if (e.button === 1) orbit.mode = 'pan';
+        else return;
+        e.preventDefault();
         orbit.lastX = e.clientX;
         orbit.lastY = e.clientY;
         canvas.setPointerCapture(e.pointerId);
-        canvas.style.cursor = 'grabbing';
+        canvas.style.cursor = (orbit.mode === 'pan') ? 'move' : 'grabbing';
     });
     canvas.addEventListener('pointermove', (e) => {
-        if (!orbit.dragging) return;
+        if (!orbit.mode) return;
         const dx = e.clientX - orbit.lastX;
         const dy = e.clientY - orbit.lastY;
         orbit.lastX = e.clientX;
         orbit.lastY = e.clientY;
-        orbit.azimuth -= dx * 0.005;
-        orbit.elevation = Math.max(-1.4, Math.min(1.4, orbit.elevation + dy * 0.005));
+        if (orbit.mode === 'orbit') {
+            orbit.azimuth -= dx * 0.005;
+            orbit.elevation = Math.max(-1.4, Math.min(1.4, orbit.elevation + dy * 0.005));
+        } else if (orbit.mode === 'pan') {
+            // Translate the target along the camera's screen-right and
+            // screen-up axes. Rate scales with orbit radius so the panning
+            // speed matches what's visible.
+            camera.matrixWorld.extractBasis(_camRight, _camUp, _camForward);
+            const rate = orbit.radius * 0.0015;
+            orbit.target.addScaledVector(_camRight, -dx * rate);
+            orbit.target.addScaledVector(_camUp,    dy * rate);
+        }
         applyOrbit();
     });
     function endDrag(e) {
-        if (!orbit.dragging) return;
-        orbit.dragging = false;
+        if (!orbit.mode) return;
+        orbit.mode = null;
         try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
         canvas.style.cursor = 'grab';
     }
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
+    // Suppress the browser's default middle-click autoscroll cursor.
+    canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
@@ -1312,6 +1333,17 @@ function setIntrinsicFar(newFar) {
 
 farSlider.addEventListener('input', () => {
     setIntrinsicFar(parseFloat(farSlider.value));
+});
+
+// Walker height slider — lifts the red and blue walkers above the surface.
+// They keep walking along their great circles; just at higher h.
+const walkerHSlider = document.getElementById('walkerHSlider');
+const walkerHValueEl = document.getElementById('walkerHValue');
+walkerHSlider.disabled = false;
+walkerHSlider.addEventListener('input', () => {
+    const newH = parseFloat(walkerHSlider.value);
+    walkerHValueEl.textContent = String(Math.round(newH));
+    for (const w of walkers) w.h = newH;
 });
 
 function setR(newR) {
