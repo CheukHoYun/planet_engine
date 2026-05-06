@@ -2007,20 +2007,34 @@ function refreshSelectionHUD() {
 //
 // All quantities are in COVER directly. Gravity is −GRAVITY · dt on vh.
 // Jumping sets vh = +JUMP_VEL. Ground at h=0; platforms at h>0.
+// Platform-top height in cover for the n-th preimage (closest one to the
+// player). Matches the rendering's preimage formula:
+//   Mode A: preimage h is preserved → platTop = e.h + e.height for every n.
+//   Mode B: preimage h flips on odd n. Even: e.h + e.height. Odd: the
+//     mesh extends downward from -e.h, so its "top" (highest cover-h) is
+//     at -e.h — below the strip if e.h > 0, so not landable.
+// Returns null if the preimage isn't a valid landing surface (top ≤ 0).
+function platformTopFor(e, sign) {
+    if (HEIGHT_TWIST && sign < 0) {
+        const top = -e.h;
+        return (top > 0) ? top : null;
+    }
+    return e.h + e.height;
+}
+
 function findHighestGroundUnder() {
     let level = 0;
     for (const e of entities) {
         if (e.kind !== 'platform') continue;
-        // Approximate footprint match by (du, dv) — strip is flat. Accounts
-        // for u-wrap by checking the closest cover-image of the platform.
-        const dvRaw = e.v - world.v;
+        // Find the closest cover-image of the platform to the player.
         const duRaw = e.u - world.u;
         const nC = Math.round(duRaw / L);
         const sign = (((nC % 2) + 2) % 2) === 0 ? 1 : -1;
         const du = duRaw - nC * L;
         const dv = sign * e.v - world.v;
         if (du * du + dv * dv > e.footprintRadius * e.footprintRadius) continue;
-        const platTop = sign * e.h + e.height;
+        const platTop = platformTopFor(e, sign);
+        if (platTop === null) continue;
         if (platTop > level && platTop <= world.h + 0.02) level = platTop;
     }
     return level;
@@ -2081,7 +2095,8 @@ function integrate(dt) {
             const du = duRaw - nC * L;
             const dv = sign * e.v - world.v;
             if (du * du + dv * dv > e.footprintRadius * e.footprintRadius) continue;
-            const platTop = sign * e.h + e.height;
+            const platTop = platformTopFor(e, sign);
+            if (platTop === null) continue;
             if (prevH >= platTop - 0.01 && world.h <= platTop && world.vh <= 0) {
                 if (platTop > landAt) landAt = platTop;
             }
