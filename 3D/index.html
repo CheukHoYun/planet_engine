@@ -142,14 +142,18 @@ let   ORBIT_RADIUS = 80;             // third-person camera distance from player
 const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
 const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2)
-const GRID_N = 121;                  // ground patch resolution
+// Patch resolution. The fragment shader does all the curvature math per
+// pixel; the geometry only needs enough vertices for linear interpolation
+// of vTangentPos, so a coarse grid (21×21 = 441 verts, ~800 triangles) is
+// plenty. 121×121 (~86k triangles) was wasted geometry.
+const GRID_N = 21;
 // Half-extent of the flat tangent-plane ground patch, in arc-meters. Sized
-// to match the maximum intrinsic camera far plane so the ground extends all
-// the way to the camera's true horizon at any setting of the View slider —
-// otherwise universal-cover entity wraps converge on a point above the
-// patch's edge instead of at the horizon line.
+// to match the MAX intrinsic camera far plane so the ground extends to the
+// horizon at any View-slider setting.
 const GRID_HALF_ARC = 12000.0;
-const DEFAULT_FAR   = 12000.0;
+// Default far plane, halved from 12000 to keep startup perf reasonable.
+// Drag the View slider up if you want long-range wraps.
+const DEFAULT_FAR   = 4000.0;
 const PLAYER_COLOR = 0xff5e8a;
 
 // ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
@@ -511,8 +515,10 @@ const INTRINSIC_FRAGMENT_SHADER = `
         if (d < 1e-3) {
             hitPoint = uPlayerUp;
         } else {
-            float bearing = atan(arcX, arcZ);
-            vec3 tangentDir = sin(bearing) * uPlayerRight + cos(bearing) * uPlayerForward;
+            // tangentDir = sin(β)·right + cos(β)·forward, where β = atan2(arcX, arcZ).
+            // sin(atan2(y, x)) = y/√(x²+y²), cos(atan2(y, x)) = x/√(x²+y²) — skip
+            // the atan/sin/cos round-trip with one division.
+            vec3 tangentDir = (arcX * uPlayerRight + arcZ * uPlayerForward) / d;
             float angle = d / uR;
             // Rodrigues: rotate uPlayerUp toward tangentDir by angle. Since
             // uPlayerUp ⟂ tangentDir, this collapses to the simple form.
@@ -1095,9 +1101,10 @@ function addEntity(e) {
 }
 
 // Two walkers spawning at the player's surface position, each travelling
-// along a great circle perpendicular to the other.
-addEntity(makeWalker(0xe84c4c, 35, arcUp(0, 0), Y_AXIS.clone()));   // red, walks "north"
-addEntity(makeWalker(0x4c8ae8, 35, arcUp(0, 0), X_AXIS.clone()));   // blue, walks "east"
+// along a great circle perpendicular to the other. Speed is angular
+// (rad/s); π = one full lap every 2 seconds, regardless of R.
+addEntity(makeWalker(0xe84c4c, Math.PI, arcUp(0, 0), Y_AXIS.clone()));   // red, north
+addEntity(makeWalker(0x4c8ae8, Math.PI, arcUp(0, 0), X_AXIS.clone()));   // blue, east
 
 // Three landmarks forming a triangle around spawn at radius ~80m.
 addEntity(makeTree(arcUp(80, 0)));                                  // bearing 0° (north)
@@ -1122,7 +1129,9 @@ function updateEntities(dt) {
     // Walkers walk along their own great circles. Walking forward = rotate
     // their frame around right by -v·dt/R, same as the player.
     for (const w of walkers) {
-        w.frame.rotateAround(w.frame.right(), -w.speed * dt / R);
+        // walker.speed is angular velocity in rad/s, independent of R, so a
+        // walker with speed π laps the world every 2 seconds at every R.
+        w.frame.rotateAround(w.frame.right(), -w.speed * dt);
         if ((w._tickCount = (w._tickCount || 0) + 1) % 60 === 0) {
             w.frame.reorthogonalize();
         }
