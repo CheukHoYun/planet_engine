@@ -1701,22 +1701,18 @@ function addEntity(e) {
     });
 }
 
-// Two walkers along the central circle, at v = ±20.
+// One walker along the central circle.
 // 100 m/s along +u: a 500-radius lap (3142m) takes ~31s.
 {
-    const red  = makeWalker(COLOR_WALKER_RED,  L * 0.10, +20, 100);
-    red.label  = 'Red walker';
-    addEntity(red);
     const blue = makeWalker(COLOR_WALKER_BLUE, L * 0.30, -20, 100);
     blue.label = 'Blue walker';
     addEntity(blue);
 }
 
-// Striped pole + two platforms + a small smiley next to the upper pole.
+// Striped pole + one elevated platform + a small smiley.
 addEntity(makeStripedPole(220, +30));
-addEntity(makePlatform(330, -25, 0, 50, 50, 22));
-addEntity(makePlatform(420, +20, 50, 60, 60, 22));
-addEntity(makeSmiley(220, +5, 220, 12));
+addEntity(makePlatform(420, -20, 50, 60, 60, 22));
+addEntity(makeSmiley(220, +5, 180, 12));
 
 // Scratch.
 const _entityPos = new THREE.Vector3();
