@@ -209,6 +209,10 @@
                 <button id="farHalfBtn" title="View distance = πR (mid-lap, where the world is mirrored)">½ lap</button>
                 <button id="farFullBtn" title="View distance = 2πR (one full lap, where the world is normal again)">1 lap</button>
             </div>
+            <div class="row" style="margin-top: 8px;">
+                <span class="label">Height</span>
+                <button id="heightModeBtn" style="flex: 1 1 auto;" title="Toggle the 3-manifold model (see expert doc).">trivial (Mode A)</button>
+            </div>
         </div>
         <div class="hud" id="hudControls">
             <div class="key-row"><span class="keys">LMB</span><span>orbit / pick</span></div>
@@ -278,6 +282,13 @@ const WALK_SPEED = 100.0;           // m/s
 const GRAVITY    = 250.0;           // m/s²
 const JUMP_VEL   = 220.0;           // m/s
 let   ORBIT_RADIUS = 80;            // third-person camera distance (mouse wheel)
+// Height twist toggle. Mode A (default, "trivial bundle"): h is preserved
+// across preimages — every cover-image of an entity stays above the strip
+// from the inhabitant's POV; the extrinsic view has a visual "snap" at the
+// half-lap. Mode B ("twisted bundle"): h flips on odd preimages — the
+// extrinsic embedding is seam-continuous, but odd preimages render upside-
+// down below the strip in the intrinsic view. See expert doc.
+let   HEIGHT_TWIST = false;
 const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
 
@@ -543,10 +554,14 @@ const EXTRINSIC_EMBED_VERTEX_SHADER = `
         float yLocal = lp.y;
         float zLocal = lp.z;
 
+        // Forward in cover = (cos β, sin β); back = -forward; right = (sin β, -cos β).
+        // Mesh-local -Z is "front" (Three.js convention), so zLocal contributes
+        // along -forward (i.e., back direction). Earlier had cos terms flipped,
+        // which made entities walk butthole-first in the extrinsic view.
         float cb = cos(uObjBeta);
         float sb = sin(uObjBeta);
-        float hitU = uObjU + xLocal * sb + zLocal * cb;
-        float hitV = uObjV + xLocal * cb - zLocal * sb;
+        float hitU = uObjU + xLocal * sb - zLocal * cb;
+        float hitV = uObjV - xLocal * cb - zLocal * sb;
         float hitH = uObjH + yLocal;
 
         float angle = hitU * 6.283185307 / uL;
@@ -1765,7 +1780,9 @@ function updateEntities(dt) {
             const sign = (((n % 2) + 2) % 2) === 0 ? 1 : -1;
             const preU = eu + n * L;
             const preV = sign * ev;
-            const preH = eh;                     // ← NO h-flip in cover
+            // Mode A: preH = eh (h preserved). Mode B: preH = sign·eh
+            // (h flips on odd preimages — twisted bundle).
+            const preH = HEIGHT_TWIST ? (sign * eh) : eh;
             projectToTangent(preU, preV, preH, csCovU, csCovV, csCovH, csCovBeta, _entityPos);
             const x = _entityPos.x, y = _entityPos.y, z = _entityPos.z;
             const dist = Math.sqrt(x * x + z * z);
@@ -1780,11 +1797,10 @@ function updateEntities(dt) {
             const meshBetaCov = sign * eb;
             const relBeta = meshBetaCov - csCovBeta;
             c.rotation.set(0, relBeta, 0);
-            // Mirror only the X-axis on odd preimages: that flips asymmetric
-            // features (the "R" on the player's belt, the signpost text)
-            // to the OTHER side, which is the visible signature of the
-            // Möbius gluing. Y-axis is NOT flipped — the mesh stays upright.
-            if (sign < 0) c.scale.set(-1, 1, 1);
+            // Mode A: only X mirrors (asymmetric features swap sides; mesh
+            // stays upright). Mode B: X AND Y mirror (mesh flips upside-down,
+            // matching the deck transform's full reflection).
+            if (sign < 0) c.scale.set(-1, HEIGHT_TWIST ? -1 : 1, 1);
             else          c.scale.set( 1, 1, 1);
         }
         for (let i = copyIdx; i < e.intrinsicCopies.length; i++) {
@@ -1938,6 +1954,16 @@ function setFarToLaps(laps) {
 }
 document.getElementById('farHalfBtn').addEventListener('click', () => setFarToLaps(0.5));
 document.getElementById('farFullBtn').addEventListener('click', () => setFarToLaps(1.0));
+
+const heightModeBtn = document.getElementById('heightModeBtn');
+function refreshHeightModeBtn() {
+    heightModeBtn.textContent = HEIGHT_TWIST ? 'twisted (Mode B)' : 'trivial (Mode A)';
+}
+heightModeBtn.addEventListener('click', () => {
+    HEIGHT_TWIST = !HEIGHT_TWIST;
+    refreshHeightModeBtn();
+});
+refreshHeightModeBtn();
 
 // ===== Coords HUD =====
 const coordsUEl    = document.getElementById('coordsU');
