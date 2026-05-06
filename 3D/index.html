@@ -924,16 +924,31 @@ function makeExtrinsicView(canvas) {
     }
     applyOrbit();
 
+    // Unity Scene-view–style camera controls:
+    //   LMB drag        — orbit around target (kept for usability; Unity uses Alt+LMB)
+    //   Alt + LMB drag  — orbit around target (Unity-strict)
+    //   MMB drag        — pan
+    //   RMB drag        — FPS look (rotate camera in place — pivot is camera, not target)
+    //   Alt + RMB drag  — drag-zoom (vertical drag changes radius)
+    //   Wheel           — zoom (radius)
+    //   F               — frame the planet center (reset target to origin)
     canvas.style.cursor = 'grab';
     canvas.addEventListener('pointerdown', (e) => {
-        if (e.button === 0)      orbit.mode = 'orbit';
-        else if (e.button === 1) orbit.mode = 'pan';
+        const alt = e.altKey;
+        if      (e.button === 0)               orbit.mode = 'orbit';
+        else if (e.button === 1)               orbit.mode = 'pan';
+        else if (e.button === 2 &&  alt)       orbit.mode = 'dragZoom';
+        else if (e.button === 2 && !alt)       orbit.mode = 'fpsLook';
         else return;
         e.preventDefault();
         orbit.lastX = e.clientX;
         orbit.lastY = e.clientY;
         canvas.setPointerCapture(e.pointerId);
-        canvas.style.cursor = (orbit.mode === 'pan') ? 'move' : 'grabbing';
+        canvas.style.cursor =
+            orbit.mode === 'pan'      ? 'move' :
+            orbit.mode === 'fpsLook'  ? 'crosshair' :
+            orbit.mode === 'dragZoom' ? 'ns-resize' :
+                                        'grabbing';
     });
     canvas.addEventListener('pointermove', (e) => {
         if (!orbit.mode) return;
@@ -952,6 +967,28 @@ function makeExtrinsicView(canvas) {
             const rate = orbit.radius * 0.0015;
             orbit.target.addScaledVector(_camRight, -dx * rate);
             orbit.target.addScaledVector(_camUp,    dy * rate);
+        } else if (orbit.mode === 'fpsLook') {
+            // Rotate the view direction without moving the camera. Save
+            // current camera position, update angles, then move target so
+            // camera.position recomputes to the same world point.
+            const ce0 = Math.cos(orbit.elevation), se0 = Math.sin(orbit.elevation);
+            const ca0 = Math.cos(orbit.azimuth),   sa0 = Math.sin(orbit.azimuth);
+            const camX = orbit.target.x + orbit.radius * ce0 * sa0;
+            const camY = orbit.target.y + orbit.radius * se0;
+            const camZ = orbit.target.z + orbit.radius * ce0 * ca0;
+            orbit.azimuth -= dx * 0.005;
+            orbit.elevation = Math.max(-1.4, Math.min(1.4, orbit.elevation + dy * 0.005));
+            const ce1 = Math.cos(orbit.elevation), se1 = Math.sin(orbit.elevation);
+            const ca1 = Math.cos(orbit.azimuth),   sa1 = Math.sin(orbit.azimuth);
+            orbit.target.set(
+                camX - orbit.radius * ce1 * sa1,
+                camY - orbit.radius * se1,
+                camZ - orbit.radius * ce1 * ca1
+            );
+        } else if (orbit.mode === 'dragZoom') {
+            // Drag down zooms out, drag up zooms in.
+            const factor = Math.exp(dy * 0.005);
+            orbit.radius = Math.max(R * 1.1, Math.min(R * 20, orbit.radius * factor));
         }
         applyOrbit();
     });
@@ -963,8 +1000,21 @@ function makeExtrinsicView(canvas) {
     }
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
-    // Suppress the browser's default middle-click autoscroll cursor.
+    // Don't show the browser context menu on RMB or auto-scroll on MMB.
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
+
+    // F frames the planet center: snap target back to origin without
+    // disturbing azimuth / elevation / radius.
+    canvas.tabIndex = 0;  // make canvas focusable so it can receive key events
+    canvas.addEventListener('keydown', (e) => {
+        if (e.key === 'f' || e.key === 'F') {
+            orbit.target.set(0, 0, 0);
+            applyOrbit();
+            e.preventDefault();
+        }
+    });
+    canvas.addEventListener('pointerenter', () => { canvas.focus(); });
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
