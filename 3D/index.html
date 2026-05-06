@@ -244,7 +244,7 @@ const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 100.0;            // m/s — a brisk run
 const TURN_SPEED = 2.6;              // rad/s — A/D
 const GRAVITY = 250.0;               // m/s²
-const JUMP_VEL = 110.0;              // m/s
+const JUMP_VEL = 145.0;              // m/s
 let   ORBIT_RADIUS = 80;             // third-person camera distance from player (mouse wheel)
 const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
@@ -581,9 +581,66 @@ function mergeWithColors(parts) {
 
 const VC_MATERIAL = new THREE.MeshBasicMaterial({ vertexColors: true });
 
+// Shared GLSL helpers: latitude→red/blue concentrated near the poles, plus
+// SDF "N"/"S" letters drawn on the polar caps.
+const POLE_COLOR_GLSL = `
+    // Concentrated red/blue gradient. cMid = neutral middle, polar colors
+    // saturated. Magnitude curve uses a steep power so most of the sphere
+    // stays neutral and the color rapidly intensifies near the poles.
+    vec3 polarColor(float phi) {
+        float s = phi / 1.5707963;                 // -1 at S, +1 at N
+        float k = sign(s) * pow(abs(s), 2.5);
+        vec3 cMid = vec3(0.32, 0.34, 0.34);
+        vec3 cN   = vec3(0.92, 0.10, 0.10);
+        vec3 cS   = vec3(0.10, 0.18, 0.92);
+        vec3 polar = (s > 0.0) ? cN : cS;
+        return mix(cMid, polar, abs(k));
+    }
+    float sdSeg(vec2 p, vec2 a, vec2 b) {
+        vec2 pa = p - a, ba = b - a;
+        float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+        return length(pa - ba * h);
+    }
+    float letterN(vec2 uv) {
+        float d = sdSeg(uv, vec2(-0.5, -1.0), vec2(-0.5,  1.0));
+        d = min(d, sdSeg(uv, vec2( 0.5, -1.0), vec2( 0.5,  1.0)));
+        d = min(d, sdSeg(uv, vec2(-0.5,  1.0), vec2( 0.5, -1.0)));
+        return d;
+    }
+    float letterS(vec2 uv) {
+        float d = sdSeg(uv, vec2(-0.5,  1.0), vec2(0.5,  1.0));
+        d = min(d, sdSeg(uv, vec2(-0.5,  0.0), vec2(0.5,  0.0)));
+        d = min(d, sdSeg(uv, vec2(-0.5, -1.0), vec2(0.5, -1.0)));
+        d = min(d, sdSeg(uv, vec2(-0.5,  0.0), vec2(-0.5,  1.0)));
+        d = min(d, sdSeg(uv, vec2( 0.5, -1.0), vec2( 0.5,  0.0)));
+        return d;
+    }
+    // Overlay an N/S letter onto a unit-vector direction. CAP is the half-
+    // width (in unit-sphere coords) used as the letter UV scale.
+    vec3 applyPolarLetters(vec3 color, vec3 n) {
+        const float CAP = 0.30;
+        if (n.y > 1.0 - CAP * CAP) {
+            vec2 luv = vec2(n.x, n.z) / CAP;
+            if (max(abs(luv.x), abs(luv.y)) < 1.15) {
+                float stroke = smoothstep(0.18, 0.12, letterN(luv));
+                color = mix(color, vec3(0.97), stroke);
+            }
+        } else if (n.y < -(1.0 - CAP * CAP)) {
+            // Flip Z so 'S' reads upright when viewed from outside the sphere.
+            vec2 luv = vec2(n.x, -n.z) / CAP;
+            if (max(abs(luv.x), abs(luv.y)) < 1.15) {
+                float stroke = smoothstep(0.18, 0.12, letterS(luv));
+                color = mix(color, vec3(0.97), stroke);
+            }
+        }
+        return color;
+    }
+`;
+
 const EXTRINSIC_FRAGMENT_SHADER = `
     precision highp float;
     varying vec3 vWorldPos;
+    ${POLE_COLOR_GLSL}
     void main() {
         vec3 n = normalize(vWorldPos);
         float phi = asin(clamp(n.y, -1.0, 1.0));
@@ -594,10 +651,9 @@ const EXTRINSIC_FRAGMENT_SHADER = `
         float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(n.y));
         gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
-        // Latitude-based color gradient: red toward N, blue toward S.
-        float t = (phi + 1.5707963) / 3.1415927;   // 0 at S, 1 at N
-        vec3 baseColor = mix(vec3(0.15, 0.22, 0.55), vec3(0.55, 0.22, 0.15), t);
+        vec3 baseColor = polarColor(phi);
         vec3 color = mix(baseColor, vec3(0.05, 0.05, 0.05), grid);
+        color = applyPolarLetters(color, n);
         gl_FragColor = vec4(color, 1.0);
     }
 `;
@@ -623,6 +679,7 @@ const INTRINSIC_FRAGMENT_SHADER = `
     uniform vec3 uPlayerUp;
     uniform float uR;
     varying vec3 vTangentPos;
+    ${POLE_COLOR_GLSL}
     void main() {
         // vTangentPos is in the mesh's local frame: +X = right, +Y = up,
         // +Z is behind the camera (Three.js convention). Recover signed
@@ -652,10 +709,9 @@ const INTRINSIC_FRAGMENT_SHADER = `
         float poleFade = 1.0 - smoothstep(0.998, 1.0, abs(hitPoint.y));
         gridLon *= poleFade;
         float grid = max(gridLat, gridLon);
-        // Latitude gradient: red toward N pole, blue toward S pole.
-        float t = (phi + 1.5707963) / 3.1415927;   // 0 at S, 1 at N
-        vec3 baseColor = mix(vec3(0.15, 0.22, 0.55), vec3(0.55, 0.22, 0.15), t);
+        vec3 baseColor = polarColor(phi);
         vec3 color = mix(baseColor, vec3(0.05, 0.05, 0.05), grid);
+        color = applyPolarLetters(color, hitPoint);
         gl_FragColor = vec4(color, 1.0);
     }
 `;
@@ -1029,10 +1085,10 @@ function makeExtrinsicView(canvas) {
         player: PLAYER_H * 0.5, walker: 12, tree: 60, smiley: 0,
         pole: 150, platform: 11
     };
-    const HIT_RADIUS = {
-        player: 22, walker: 20, tree: 60, smiley: 90,
-        pole: 155, platform: 30
-    };
+    // Wire color per kind. Default yellow; smiley body is yellow so it
+    // gets a contrasting cyan instead.
+    const WIRE_COLOR = { smiley: 0x4be1ff };
+    const WIRE_DEFAULT = 0xffe14a;
     const raycaster = new THREE.Raycaster();
     const _ndc = new THREE.Vector2();
     const _entityCenter = new THREE.Vector3();
@@ -1096,6 +1152,58 @@ function makeExtrinsicView(canvas) {
         const t = -b - Math.sqrt(disc);
         return (t < 0) ? null : t;
     }
+    // Ray-vs-vertical-cylinder in world space, axis = upWorld, base at
+    // surface point, extending up to `top`. Returns nearest positive t or null.
+    function rayCylinderT(ro, rd, baseX, baseY, baseZ, axisX, axisY, axisZ, rad, top) {
+        const ox = ro.x - baseX, oy = ro.y - baseY, oz = ro.z - baseZ;
+        const u0 = axisX * ox + axisY * oy + axisZ * oz;
+        const ud = axisX * rd.x + axisY * rd.y + axisZ * rd.z;
+        const px = ox - axisX * u0, py = oy - axisY * u0, pz = oz - axisZ * u0;
+        const pdx = rd.x - axisX * ud, pdy = rd.y - axisY * ud, pdz = rd.z - axisZ * ud;
+        const a = pdx*pdx + pdy*pdy + pdz*pdz;
+        const b = px*pdx + py*pdy + pz*pdz;
+        const c = px*px + py*py + pz*pz - rad*rad;
+        if (a < 1e-12) return null;
+        const disc = b*b - a*c;
+        if (disc < 0) return null;
+        const sq = Math.sqrt(disc);
+        let t = (-b - sq) / a;
+        if (t > 0) {
+            const yh = u0 + t * ud;
+            if (yh >= 0 && yh <= top) return t;
+        }
+        t = (-b + sq) / a;
+        if (t > 0) {
+            const yh = u0 + t * ud;
+            if (yh >= 0 && yh <= top) return t;
+        }
+        return null;
+    }
+    function rayEntityT(ro, rd, e) {
+        const upWorld = (e.frame ? e.frame.up() : e.upWorld);
+        const surfH = R + (e.h || 0);
+        const baseX = upWorld.x * surfH, baseY = upWorld.y * surfH, baseZ = upWorld.z * surfH;
+        if (e.kind === 'pole') {
+            return rayCylinderT(ro, rd, baseX, baseY, baseZ, upWorld.x, upWorld.y, upWorld.z, 14, 305);
+        }
+        if (e.kind === 'tree') {
+            return rayCylinderT(ro, rd, baseX, baseY, baseZ, upWorld.x, upWorld.y, upWorld.z, 38, 112);
+        }
+        if (e.kind === 'smiley') {
+            return raySphereT(ro, rd, baseX, baseY, baseZ, 85);
+        }
+        if (e.kind === 'platform') {
+            const halfH = (e._platformH || 22) * 0.5;
+            const cx = baseX + upWorld.x * halfH, cy = baseY + upWorld.y * halfH, cz = baseZ + upWorld.z * halfH;
+            const r = Math.max(e._platformW || 50, e._platformD || 50) * 0.55;
+            return raySphereT(ro, rd, cx, cy, cz, r);
+        }
+        // player, walker — sphere fit centered at half-body height.
+        const halfH = (e.kind === 'player') ? PLAYER_H * 0.5 : 12;
+        const cx = baseX + upWorld.x * halfH, cy = baseY + upWorld.y * halfH, cz = baseZ + upWorld.z * halfH;
+        const r = (e.kind === 'player') ? 20 : 16;
+        return raySphereT(ro, rd, cx, cy, cz, r);
+    }
     function pickAt(clientX, clientY) {
         const rect = canvas.getBoundingClientRect();
         _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
@@ -1105,12 +1213,11 @@ function makeExtrinsicView(canvas) {
         const rd = raycaster.ray.direction;
         let bestT = Infinity, best = null;
         for (const e of entities) {
-            entityCenter(e, _entityCenter);
-            const r = HIT_RADIUS[e.kind] || 25;
-            const t = raySphereT(ro, rd, _entityCenter.x, _entityCenter.y, _entityCenter.z, r);
+            const t = rayEntityT(ro, rd, e);
             if (t !== null && t < bestT) {
                 bestT = t;
-                best = { kind: 'entity', entity: e, focus: _entityCenter.clone(), radius: r };
+                entityCenter(e, _entityCenter);
+                best = { kind: 'entity', entity: e, focus: _entityCenter.clone(), radius: 0 };
             }
         }
         // Planet — sphere at origin, radius R.
@@ -1125,6 +1232,7 @@ function makeExtrinsicView(canvas) {
         selectionMesh.visible = true;
         if (selection.kind === 'planet') {
             selectionMesh.geometry = _planetWireGeo;
+            selectionMesh.material.color.setHex(WIRE_DEFAULT);
             selectionMesh.position.set(0, 0, 0);
             selectionMesh.quaternion.identity();
             selectionMesh.scale.setScalar(R / R_INITIAL * 1.012);
@@ -1134,6 +1242,7 @@ function makeExtrinsicView(canvas) {
         // along the entity's surface up.
         const e = selection.entity;
         selectionMesh.geometry = ensureWireGeo(e);
+        selectionMesh.material.color.setHex(WIRE_COLOR[e.kind] || WIRE_DEFAULT);
         const upWorld = (e.frame ? e.frame.up() : e.upWorld);
         // Place the highlight at the entity's surface point (y=0 of the
         // wire geo is the base, since each geo's translate matches the
