@@ -143,12 +143,13 @@ const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
 const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2)
 const GRID_N = 121;                  // ground patch resolution
-// Half-extent of the flat tangent-plane ground patch, in arc-meters. Large
-// enough that the patch boundary lands very close to the true horizon line
-// at any reasonable camera height. Also covers more than 2π·R wrap distance
-// at every R the slider allows, so universal-cover entity copies sit on real
-// ground rather than sky.
-const GRID_HALF_ARC = 3000.0;
+// Half-extent of the flat tangent-plane ground patch, in arc-meters. Sized
+// to match the maximum intrinsic camera far plane so the ground extends all
+// the way to the camera's true horizon at any setting of the View slider —
+// otherwise universal-cover entity wraps converge on a point above the
+// patch's edge instead of at the horizon line.
+const GRID_HALF_ARC = 12000.0;
+const DEFAULT_FAR   = 12000.0;
 const PLAYER_COLOR = 0xff5e8a;
 
 // ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
@@ -947,7 +948,7 @@ function makeIntrinsicView(canvas) {
     const ground = buildGroundPatch();
     scene.add(ground.mesh);
 
-    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, GRID_HALF_ARC * 4);
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, DEFAULT_FAR);
     camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
