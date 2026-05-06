@@ -135,7 +135,9 @@ const WALK_SPEED = 100.0;            // m/s — a brisk run
 const TURN_SPEED = 2.6;              // rad/s — A/D
 const GRAVITY = 250.0;               // m/s²
 const JUMP_VEL = 110.0;              // m/s
-const ORBIT_RADIUS = 80;             // third-person camera distance from player
+let   ORBIT_RADIUS = 80;             // third-person camera distance from player (mouse wheel)
+const ORBIT_MIN = 20;
+const ORBIT_MAX = 400;
 const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2)
 const GRID_N = 121;                  // ground patch resolution
 // Half-extent of the flat tangent-plane ground patch, in arc-meters. Large
@@ -598,6 +600,11 @@ function makePlayerMesh(materialFor) {
         pupil.position.set(sx * PLAYER_W * 0.2, eyeY, eyeZ - 0.3);
         g.add(pupil);
     }
+    // One-pixel back-marker so you can tell which side is the back.
+    const buttGeo = new THREE.BoxGeometry(1, 1, 0.2);
+    const butt = new THREE.Mesh(buttGeo, materialFor(0x000000));
+    butt.position.set(0, PLAYER_H * 0.35, PLAYER_W / 2 + 0.1);
+    g.add(butt);
     return g;
 }
 
@@ -1163,9 +1170,20 @@ document.addEventListener('pointerlockchange', () => {
 });
 document.addEventListener('mousemove', (e) => {
     if (!pointerLocked) return;
-    camAzimAccum += e.movementX * MOUSE_SENSITIVITY;
+    // Inverted X: moving the mouse left orbits the camera left around the
+    // character, so the world appears to rotate right — matches the
+    // expectation when controlling the camera (not the character).
+    camAzimAccum -= e.movementX * MOUSE_SENSITIVITY;
     pitchAccum   += e.movementY * MOUSE_SENSITIVITY;
 });
+
+// Mouse wheel on the intrinsic canvas zooms the third-person camera in/out
+// by changing the orbit radius. Same factor as the extrinsic view's wheel.
+intrinsicCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = Math.exp(e.deltaY * 0.0012);
+    ORBIT_RADIUS = Math.max(ORBIT_MIN, Math.min(ORBIT_MAX, ORBIT_RADIUS * factor));
+}, { passive: false });
 
 // ===== R slider =====
 const rSlider = document.getElementById('rSlider');
