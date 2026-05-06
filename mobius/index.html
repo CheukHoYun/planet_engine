@@ -348,7 +348,10 @@ function updateCameraSurface() {
     cameraSurface.u    = world.u + horizDist * Math.cos(camBearing);
     cameraSurface.v    = world.v + horizDist * Math.sin(camBearing);
     cameraSurface.beta = world.beta + world.cameraAzim;
-    cameraSurface.h    = world.h;       // tracks player height
+    // h is the camera-FOOT's height, which is on the strip (h=0) regardless
+    // of player jump. The Three.js camera itself rises with the player; that
+    // happens in placeCamera. Don't conflate the two.
+    cameraSurface.h    = 0;
     // No normalize: cameraSurface is in cover. It can have negative u or u>L
     // — that's fine; preimage enumeration anchors around it.
 }
@@ -1581,12 +1584,13 @@ function makeIntrinsicView(canvas) {
     const _playerTangentTmp = new THREE.Vector3();
 
     function placeCamera(world) {
-        // Three.js +Y = cover +h (sky). Camera sits ORBIT_RADIUS·sin(pitch)
-        // above the cameraSurface (which is in cover coords directly).
-        const camY = ORBIT_RADIUS * Math.sin(world.pitch);
+        // Three.js +Y = cover +h (sky). Camera tracks the player vertically
+        // so jumps don't drag the world down: camera.y = player.h + body
+        // half-height + orbit-pitch offset. cameraSurface.h is 0 (foot on
+        // strip), so projectToTangent gives entity.y = entity.h directly.
+        const camY = world.h + PLAYER_CENTER_Y + ORBIT_RADIUS * Math.sin(world.pitch);
         camera.position.set(0, camY, 0);
         camera.up.set(0, 1, 0);
-        // Player relative to cameraSurface — both already in cover.
         projectToTangent(
             world.u, world.v, world.h,
             cameraSurface.u, cameraSurface.v, cameraSurface.h,
@@ -1753,6 +1757,14 @@ function updateEntities(dt) {
         const nCenter = Math.round((csCovU - eu) / L);
 
         // Enumerate nCenter, nCenter+1, nCenter-1, nCenter+2, nCenter-2, ...
+        //
+        // Preimage formula for the intrinsic view: (u + nL, (-1)^n v, h).
+        // h is PRESERVED across preimages — the inhabitant's universe is the
+        // trivial product M × ℝ where "up" is global. The (-h) in the formal
+        // deck transform belongs to the EXTRINSIC embedding's coordinate
+        // system, not to the inhabitant's experience. Without this, odd
+        // preimage meshes would extend down through the strip and appear
+        // "in the ground."
         for (let k = 0; k < cap + 4 && copyIdx < cap; k++) {
             const n = (k === 0) ? nCenter
                     : ((k % 2 === 1) ? (nCenter + ((k + 1) >> 1))
@@ -1760,7 +1772,7 @@ function updateEntities(dt) {
             const sign = (((n % 2) + 2) % 2) === 0 ? 1 : -1;
             const preU = eu + n * L;
             const preV = sign * ev;
-            const preH = sign * eh;
+            const preH = eh;                     // ← NO h-flip in cover
             projectToTangent(preU, preV, preH, csCovU, csCovV, csCovH, csCovBeta, _entityPos);
             const x = _entityPos.x, y = _entityPos.y, z = _entityPos.z;
             const dist = Math.sqrt(x * x + z * z);
@@ -1769,20 +1781,18 @@ function updateEntities(dt) {
             const c = e.intrinsicCopies[copyIdx++];
             c.visible = true;
             c.position.set(x, y, z);
-            // Mesh's cover-bearing for this preimage: deck-transform applied
-            // n times = sign·eb. Relative to camera = meshCovBeta − csCovBeta.
-            // For Three.js Y-rotation: the rotation that takes mesh-local −Z
-            // (default forward) to a cover-direction rotated by Δ = relBeta
-            // is +Δ, NOT −Δ. (Earlier had this inverted, which made meshes
-            // appear to spin when the camera spun.)
+            // Mesh bearing: the deck transform negates β each lap, so the
+            // n-th preimage's bearing is sign·eb. Three.js Y-rotation that
+            // takes mesh-local −Z to a cover-direction rotated by Δ is +Δ.
             const meshBetaCov = sign * eb;
             const relBeta = meshBetaCov - csCovBeta;
             c.rotation.set(0, relBeta, 0);
-            // Mirror odd preimages: deck-transform reflects v and h, so the
-            // mesh's local (x, y) axes both flip. DoubleSide materials handle
-            // the winding reversal.
-            if (sign < 0) c.scale.set(-1, -1, 1);
-            else          c.scale.set( 1,  1, 1);
+            // Mirror only the X-axis on odd preimages: that flips asymmetric
+            // features (the "R" on the player's belt, the signpost text)
+            // to the OTHER side, which is the visible signature of the
+            // Möbius gluing. Y-axis is NOT flipped — the mesh stays upright.
+            if (sign < 0) c.scale.set(-1, 1, 1);
+            else          c.scale.set( 1, 1, 1);
         }
         for (let i = copyIdx; i < e.intrinsicCopies.length; i++) {
             e.intrinsicCopies[i].visible = false;
