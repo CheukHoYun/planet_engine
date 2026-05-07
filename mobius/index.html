@@ -1973,8 +1973,18 @@ function updateEntities(dt) {
         u.uObjBeta.value = par * eb;
         u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
         u.uTintAmount.value = 0;
-        if (par < 0) e.extrinsicMesh.scale.set(-1, -1, 1);
-        else         e.extrinsicMesh.scale.set( 1,  1, 1);
+        // Scale on odd lap is mode-dependent:
+        //   Mode A: (-1, +1, 1) — X mirror only. Mesh body extends along
+        //     the canonical normal, which is opposite of cover-up after
+        //     the deck transform — this IS the snap (the topological
+        //     obstruction Mode A keeps visible). Jumping at h>0 on odd
+        //     lap pushes the mesh further along that flipped direction;
+        //     this is intrinsic to the trivial bundle, not a bug.
+        //   Mode B: (-1, -1, 1) — X AND Y mirror. Combined with par·h on
+        //     uObjH, the (-h)·(-n) = h·n cancellation makes jumping and
+        //     walking continuous through the seam.
+        if (par < 0) e.extrinsicMesh.scale.set(-1, HEIGHT_TWIST ? -1 : 1, 1);
+        else         e.extrinsicMesh.scale.set( 1, 1, 1);
         e._shadowRing.visible = false;
     }
 }
