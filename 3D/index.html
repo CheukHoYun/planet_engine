@@ -1581,6 +1581,12 @@ function addEntity(e) {
     e.intrinsicCopies = [e.intrinsicMesh];
     intrinsicView.scene.add(e.intrinsicMesh);
     fitCloneCount(e, maxPreimagesForR(R));
+    // The extrinsic embedding shader displaces every vertex from a near-
+    // origin position to (R+h)·unitDir on the sphere — Three.js's
+    // frustum culler doesn't see this displacement, so it culls the mesh
+    // whenever the camera target is panned away from the origin (the
+    // mesh's *apparent* location). Disable culling on every child Mesh.
+    e.extrinsicMesh.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
     extrinsicView.scene.add(e.extrinsicMesh);
 }
 
