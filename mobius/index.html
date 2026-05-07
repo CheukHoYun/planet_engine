@@ -9,6 +9,10 @@
         background: #050608; color: #e8eaef;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         overflow: hidden;
+        /* Prevent wheel/touch scrolls from chaining out of this iframe to
+           the host page (WP post, etc.) — without this, scroll events fall
+           through to the parent once the iframe content can't scroll. */
+        overscroll-behavior: none;
     }
     body { display: flex; flex-direction: column; }
     #panels { flex: 1 1 auto; display: flex; min-height: 0; }
