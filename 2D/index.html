@@ -99,9 +99,39 @@
     }
 
     #hudSettings {
-        top: 14px; right: 14px;
+        top: 56px; right: 14px;
         min-width: 248px;
     }
+    #hudSettings.collapsed { display: none; }
+
+    /* Gear button — toggles the settings HUD */
+    #settingsBtn {
+        position: absolute;
+        top: 14px; right: 14px;
+        width: 30px; height: 30px;
+        padding: 0;
+        background: rgba(15, 18, 24, 0.62);
+        backdrop-filter: blur(16px) saturate(140%);
+        -webkit-backdrop-filter: blur(16px) saturate(140%);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        border-radius: 6px;
+        color: rgba(255, 255, 255, 0.78);
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        transition: background 120ms, color 120ms, border-color 120ms;
+        z-index: 5;
+    }
+    #settingsBtn:hover {
+        background: rgba(255, 255, 255, 0.14);
+        color: #ffffff;
+        border-color: rgba(255, 255, 255, 0.22);
+    }
+    #settingsBtn.active {
+        background: rgba(255, 255, 255, 0.16);
+        color: #ffffff;
+        border-color: rgba(255, 255, 255, 0.30);
+    }
+    #settingsBtn svg { width: 16px; height: 16px; }
     #hudSettings .heading {
         font-size: 11px;
         color: #94a3b8;
@@ -179,7 +209,14 @@
     </div>
     <div class="panel">
         <canvas id="extrinsicCanvas"></canvas>
-        <div class="hud" id="hudSettings">
+        <button id="settingsBtn" title="Settings" aria-label="Toggle settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+        </button>
+        <div class="hud collapsed" id="hudSettings">
             <div class="heading">World</div>
             <div class="row">
                 <span class="label">Radius</span>
@@ -1017,6 +1054,23 @@ extrinsicCanvas.addEventListener('wheel', (ev) => {
     };
     extrinsicCanvas.addEventListener('pointerup', endDrag);
     extrinsicCanvas.addEventListener('pointercancel', endDrag);
+}
+
+// ===== Settings gear button =====
+{
+    const btn   = document.getElementById('settingsBtn');
+    const panel = document.getElementById('hudSettings');
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        panel.classList.toggle('collapsed');
+        btn.classList.toggle('active', !panel.classList.contains('collapsed'));
+    });
+    document.addEventListener('pointerdown', (e) => {
+        if (panel.classList.contains('collapsed')) return;
+        if (panel.contains(e.target) || btn.contains(e.target)) return;
+        panel.classList.add('collapsed');
+        btn.classList.remove('active');
+    });
 }
 
 document.getElementById('fullscreenBtn').addEventListener('click', () => {
