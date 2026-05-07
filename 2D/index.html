@@ -183,8 +183,8 @@
             <div class="heading">World</div>
             <div class="row">
                 <span class="label">Radius</span>
-                <input id="rSlider" type="range" min="100" max="1000" value="300" class="slider">
-                <span class="value" id="rValue">300</span>
+                <input id="rSlider" type="range" min="100" max="1000" value="147" class="slider">
+                <span class="value" id="rValue">147</span>
             </div>
         </div>
         <div class="hud" id="hudControls">
@@ -367,7 +367,7 @@ class Camera {
         this.θ = 0;
         this.h = 0;
         this.facing = 1;
-        this.fov = 2.4;
+        this.fov = 2.7125;
         this.target = null;
     }
     setTarget(entity) { this.target = entity; }
@@ -497,14 +497,15 @@ class ExtrinsicRenderer {
         // canvas pixels per world pixel — the extrinsic view's zoom. Scrolling
         // adjusts it. R changes do NOT touch it, so changing R grows or
         // shrinks the planet on screen while entities keep their pixel size.
-        this.scale = 1;
+        // Initial values baked from a captured snapshot.
+        this.scale = 0.6726;
         this.displayR = 0;  // derived: world.R · this.scale (set per render)
-        this._scaleInitialized = false;
+        this._scaleInitialized = true;
         // World-center offset from canvas center, in canvas pixels. Updated
         // by drag-to-pan; zoom keeps the point under the cursor fixed by
         // also updating these.
-        this.offsetX = 0;
-        this.offsetY = 0;
+        this.offsetX = -9.23;
+        this.offsetY = 48.83;
         // Offscreen layer for entity pixels. We build it as raw RGBA bytes
         // (per-pixel reverse mapping) and composite onto the main canvas via
         // drawImage so it alpha-blends with the planet ground beneath.

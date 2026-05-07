@@ -229,13 +229,13 @@
             </div>
             <div class="row">
                 <span class="label">Width</span>
-                <input id="wSlider" type="range" min="20" max="200" value="60" step="2" class="slider">
-                <span class="value" id="wValue">60</span>
+                <input id="wSlider" type="range" min="20" max="200" value="46" step="2" class="slider">
+                <span class="value" id="wValue">46</span>
             </div>
             <div class="row">
                 <span class="label">View dist.</span>
-                <input id="farSlider" type="range" min="200" max="15000" value="4000" step="50" class="slider">
-                <span class="value" id="farValue">4000</span>
+                <input id="farSlider" type="range" min="200" max="15000" value="2150" step="50" class="slider">
+                <span class="value" id="farValue">2150</span>
             </div>
             <div class="row buttons">
                 <button id="farHalfBtn" title="View distance = πR (mid-lap, where the world is mirrored)">½ lap</button>
@@ -310,16 +310,16 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // that has meaning to the inhabitant. The UI slider exposes L; R is just
 // derived from it.
 let   R = 200.0;
-let   W = 60.0;                     // strip half-width (m); W slider rebinds
+let   W = 46.0;                     // strip half-width (m); W slider rebinds
 const R_INITIAL = 200.0;
-const W_INITIAL = 60.0;
+const W_INITIAL = 46.0;
 let   L = 2 * Math.PI * R;          // strip length (intrinsic); slider rebinds
 
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 100.0;           // m/s
 const GRAVITY    = 250.0;           // m/s²
 const JUMP_VEL   = 220.0;           // m/s
-let   ORBIT_RADIUS = 80;            // third-person camera distance (mouse wheel)
+let   ORBIT_RADIUS = 115.49;        // third-person camera distance (mouse wheel)
 // Height twist toggle. Mode A (default, "trivial bundle"): h is preserved
 // across preimages — every cover-image of an entity stays above the strip
 // from the inhabitant's POV; the extrinsic view has a visual "snap" at the
@@ -341,7 +341,7 @@ const PLAYER_BELT_COLOR = 0x7a2848;
 // of vTangentPos. 21×21 is plenty.
 const GRID_N = 21;
 const GRID_HALF_ARC = 15000.0;      // matches the View slider's max
-const DEFAULT_FAR   = 4000.0;
+const DEFAULT_FAR   = 2150.0;
 
 // ===== Player state =====
 //
@@ -361,11 +361,11 @@ const DEFAULT_FAR   = 4000.0;
 // across-rep meaningless and the camera view jumps at every wrap. Fix B
 // avoids the issue entirely by keeping a single consistent cover rep.
 const world = {
-    u: 511, v: -4, beta: Math.PI,
-    h: 0, vh: 0,
+    u: 422.164, v: -6.269, beta: 0.12,
+    h: 72, vh: 0,
     grounded: true,
-    pitch: 0.20,
-    cameraAzim: 0
+    pitch: 0.299,
+    cameraAzim: Math.PI
 };
 
 // Camera-surface state. Lives in COVER too. No normalize, no parity.
@@ -1376,10 +1376,10 @@ function makeExtrinsicView(canvas) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     const orbit = {
-        azimuth: 0.6,
-        elevation: 0.4,
-        radius: R * 2.5,
-        target: new THREE.Vector3(0, 0, 0),
+        azimuth: -1.4067,
+        elevation: 0.5567,
+        radius: 815.83,
+        target: new THREE.Vector3(125.994, 31.099, 25.838),
         mode: null,
         lastX: 0, lastY: 0
     };
