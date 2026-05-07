@@ -162,6 +162,37 @@
         border-color: rgba(255, 255, 255, 0.2);
     }
     #fullscreenBtn svg { width: 16px; height: 16px; }
+
+    /* State snapshot panel (T-key) */
+    #hudSnapshot {
+        position: fixed;
+        left: 50%; top: 50%;
+        transform: translate(-50%, -50%);
+        max-width: 640px;
+        max-height: 80vh;
+        overflow: auto;
+        background: rgba(15, 18, 24, 0.92);
+        backdrop-filter: blur(16px) saturate(140%);
+        -webkit-backdrop-filter: blur(16px) saturate(140%);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 10px;
+        padding: 14px 18px;
+        color: #e8eaef;
+        font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        white-space: pre;
+        z-index: 50;
+        box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);
+        user-select: text;
+    }
+    #hudSnapshot .title {
+        font-family: -apple-system, system-ui, sans-serif;
+        font-size: 11px;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 8px;
+        font-weight: 600;
+    }
 </style>
 </head>
 <body>
@@ -176,6 +207,7 @@
             <div class="key-row"><span class="keys">Space</span><span>jump</span></div>
             <div class="key-row"><span class="keys">Mouse</span><span>aim camera</span></div>
             <div class="key-row"><span class="keys">Wheel</span><span>zoom</span></div>
+            <div class="key-row"><span class="keys">T</span><span>state snapshot</span></div>
         </div>
     </div>
     <div class="panel">
@@ -214,6 +246,7 @@
         </div>
     </div>
 </div>
+<div id="hudSnapshot" style="display: none;"><div class="title">State snapshot — press T to dismiss</div><div id="snapshotBody"></div></div>
 <button id="fullscreenBtn" title="Fullscreen" aria-label="Toggle fullscreen">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1054,7 +1087,7 @@ function makeExtrinsicView(canvas) {
     const sphere = buildExtrinsicSphere(R);
     scene.add(sphere);
 
-    const camera = new THREE.PerspectiveCamera(45, 1, 1, R * 50);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, R * 50);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -1263,6 +1296,15 @@ function makeExtrinsicView(canvas) {
             orbit.target.z + orbit.radius * ce * ca
         );
         camera.lookAt(orbit.target);
+        // Fit near/far around the sphere given the current camera position.
+        // Panning + FPS-look can move the camera far from origin, so a fixed
+        // far plane clips the sphere's far side; a tight near plane lets the
+        // user pan in close without losing nearby objects.
+        const camDist = camera.position.length();
+        const far = Math.max(R * 4, (camDist + R) * 2);
+        camera.far = far;
+        camera.near = Math.max(0.05, far * 1e-5);
+        camera.updateProjectionMatrix();
     }
     applyOrbit();
 
@@ -1869,6 +1911,10 @@ window.addEventListener('keydown', (e) => {
         }
         e.preventDefault();
     }
+    if (k === 't') {
+        toggleSnapshot();
+        e.preventDefault();
+    }
 });
 window.addEventListener('keyup', (e) => {
     const k = e.key.toLowerCase();
@@ -1877,6 +1923,63 @@ window.addEventListener('keyup', (e) => {
         e.preventDefault();
     }
 });
+
+// ===== State snapshot (T key) =====
+// Renders the current player + camera + slider state as a copy-pasteable
+// block so the user can dial in a view, read off the numbers, and feed them
+// back as new defaults.
+const snapshotEl     = document.getElementById('hudSnapshot');
+const snapshotBodyEl = document.getElementById('snapshotBody');
+function buildSnapshot() {
+    const up   = world.frame.up();
+    const fwd  = world.frame.forward();
+    const right= world.frame.right();
+    const phi  = Math.asin(Math.max(-1, Math.min(1, up.y)));
+    const theta= Math.atan2(up.z, up.x);
+    const o    = extrinsicView.orbit;
+    const cam  = extrinsicView.camera;
+    const f    = (x, n=3) => Number(x).toFixed(n);
+    const v3   = (v) => `(${f(v.x)}, ${f(v.y)}, ${f(v.z)})`;
+    const lines = [];
+    lines.push(`R              = ${f(R, 1)}`);
+    lines.push(`world.h        = ${f(world.h, 2)}`);
+    lines.push(`world.vh       = ${f(world.vh, 2)}`);
+    lines.push(`world.grounded = ${world.grounded}`);
+    lines.push(`world.pitch    = ${f(world.pitch, 4)}   // ${f(world.pitch * 180/Math.PI, 2)}°`);
+    lines.push(`world.cameraAzim = ${f(world.cameraAzim, 4)}   // ${f(world.cameraAzim * 180/Math.PI, 2)}°`);
+    lines.push(`ORBIT_RADIUS   = ${f(ORBIT_RADIUS, 2)}`);
+    lines.push(``);
+    lines.push(`// player frame (SO(3)):`);
+    lines.push(`up       = ${v3(up)}`);
+    lines.push(`forward  = ${v3(fwd)}`);
+    lines.push(`right    = ${v3(right)}`);
+    lines.push(`(θ, φ)   = (${f(theta * 180/Math.PI, 2)}°, ${f(phi * 180/Math.PI, 2)}°)`);
+    lines.push(``);
+    lines.push(`// extrinsic camera orbit:`);
+    lines.push(`orbit.azimuth   = ${f(o.azimuth, 4)}`);
+    lines.push(`orbit.elevation = ${f(o.elevation, 4)}`);
+    lines.push(`orbit.radius    = ${f(o.radius, 2)}`);
+    lines.push(`orbit.target    = ${v3(o.target)}`);
+    lines.push(`camera.position = ${v3(cam.position)}`);
+    lines.push(`camera.near/far = ${f(cam.near, 2)} / ${f(cam.far, 2)}`);
+    lines.push(``);
+    lines.push(`// sliders:`);
+    lines.push(`rSlider         = ${rSlider.value}`);
+    lines.push(`farSlider       = ${farSlider.value}    (intrinsic camera.far)`);
+    const wh = document.getElementById('walkerHSlider');
+    if (wh) lines.push(`walkerHSlider   = ${wh.value}`);
+    return lines.join('\n');
+}
+function toggleSnapshot() {
+    if (snapshotEl.style.display === 'none') {
+        const txt = buildSnapshot();
+        snapshotBodyEl.textContent = txt;
+        snapshotEl.style.display = '';
+        console.log('=== State snapshot ===\n' + txt);
+    } else {
+        snapshotEl.style.display = 'none';
+    }
+}
 
 function findHighestGroundUnder() {
     const playerUp = world.frame.up();
