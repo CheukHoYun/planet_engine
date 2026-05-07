@@ -1823,16 +1823,24 @@ function updateEntities(dt) {
         }
 
         // Extrinsic: deck-transform the entity into the canonical [0, L)
-        // u-range so it sits on the single-cover ribbon mesh. For an entity
-        // on lap k = floor(u/L), parity = (-1)^k:
-        //   ext_u    = u - k·L
-        //   ext_v    = parity · v
-        //   ext_beta = parity · beta
-        //   ext_h    = parity · h     in Mode B (h flips with the deck transform)
-        //              = h            in Mode A (h preserved across laps)
-        // For Mode B the (-h)·(-n) = h·n cancellation makes the wrap
-        // continuous in 3D. For Mode A there's a visible snap when the
-        // player crosses world.u = kL — the expert-noted Mode A artifact.
+        // u-range so it sits on the single-cover ribbon mesh.
+        //
+        // Mapping the ANCHOR alone is not enough — the embedding shader
+        // re-applies the (mesh-local x, y, z) offsets in the canonical
+        // chart, and the deck transform is orientation-reversing, so the
+        // mesh's local axes have to be reflected to match. Concretely:
+        // for a mesh vertex at xLocal=+1, the cover-deck-image's u-offset
+        // is +sin(β), but with anchor-only mapping (ext_β = -β) the shader
+        // computes -sin(β) — off by 2·sin(β). Same story on yLocal in
+        // Mode B (since the deck flips h there too). Solution:
+        //   scale.set(-1, +1, 1) for Mode A on odd laps (mirror x only)
+        //   scale.set(-1, -1, 1) for Mode B on odd laps (mirror x AND y)
+        // With the scale on the Group, modelMatrix·position negates the
+        // appropriate components and the ext_hit* values come out matching
+        // the cover-deck-image. In Mode B that yields a continuous embedded
+        // mesh through the wrap; Mode A keeps its h-direction snap (which
+        // the user accepts) but at least gets asymmetric features on the
+        // correct side of the canonical chart.
         const u = e.entityUniforms;
         const lapCount = Math.floor(eu / L);
         const par = (((lapCount % 2) + 2) % 2) === 0 ? 1 : -1;
@@ -1840,6 +1848,11 @@ function updateEntities(dt) {
         u.uObjV.value    = par * ev;
         u.uObjBeta.value = par * eb;
         u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
+        if (par < 0) {
+            e.extrinsicMesh.scale.set(-1, HEIGHT_TWIST ? -1 : 1, 1);
+        } else {
+            e.extrinsicMesh.scale.set(1, 1, 1);
+        }
     }
 }
 
