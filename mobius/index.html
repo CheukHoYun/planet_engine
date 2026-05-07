@@ -795,7 +795,7 @@ function updateRibbonGeometry(geo) {
 // Two thin tubes at v = ±W, rendered through the same embedding shader so
 // they sit exactly on the strip's edges in the extrinsic view. Solid red
 // at +W, solid blue at -W.
-const EDGE_BAND_HALF_THICKNESS = 0.6;  // ±0.6m thick (in h direction)
+const EDGE_BAND_HALF_THICKNESS = 1.5;  // ±1.5m thick (in h direction); enough to read as a colored band, not a hairline
 function buildEdgeBandGeometry(sign) {
     // Same single-cover [0, L] range as the ribbon mesh. The Möbius strip
     // has only ONE physical edge curve (length 2L); on the [0, L] mesh, our
@@ -843,16 +843,66 @@ function updateEdgeBandGeometry(geo) {
     geo.attributes.position.needsUpdate = true;
     geo.computeBoundingSphere();
 }
-// Edge bands use the embedding shader path with their own uniforms set to
-// (uObjU=0, uObjV=0, uObjBeta=0, uObjH=0) — geometry positions already
-// encode the strip-coords. That path adds the offset which is zero here.
-// Color: red on +W, blue on -W. To match the intrinsic gradient.
+// Dedicated shader for the edge bands. Their geometry positions are
+// (uArc, yOff, vCoord) — already canonical strip-coords — so the entity
+// embedding shader (which expects mesh-local x/y/z and adds them through a
+// bearing transform with uObjU/uObjV uniforms) is the wrong path. Using
+// it sent the bands to (hitU = -sign·W, hitV = -uArc, hitH = yOff): a
+// pixel-thin streak far off the actual ribbon edge.
+const EDGE_BAND_VERTEX_SHADER = `
+    uniform float uR;
+    uniform float uL;
+    void main() {
+        float uArc   = position.x;
+        float yOff   = position.y;
+        float vCoord = position.z;
+        float angle = uArc * 6.283185307 / uL;
+        float halfA = angle * 0.5;
+        float cosU = cos(angle), sinU = sin(angle);
+        float cosH = cos(halfA), sinH = sin(halfA);
+        float rEff = uR + vCoord * cosH;
+        vec3 surfacePos = vec3(rEff * cosU, vCoord * sinH, rEff * sinU);
+        vec3 ddu = vec3(
+            -rEff * sinU - 0.5 * vCoord * sinH * cosU,
+             0.5 * vCoord * cosH,
+             rEff * cosU - 0.5 * vCoord * sinH * sinU
+        );
+        vec3 ddv = vec3(cosH * cosU, sinH, cosH * sinU);
+        vec3 normal = normalize(cross(ddu, ddv));
+        vec3 worldPos = surfacePos + yOff * normal;
+        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+    }
+`;
+const EDGE_BAND_FRAGMENT_SHADER = `
+    precision highp float;
+    uniform vec3 uColor;
+    vec3 linearToSRGB(vec3 c) {
+        bvec3 cutoff = lessThan(c, vec3(0.0031308));
+        vec3 hi = pow(c, vec3(1.0 / 2.4)) * 1.055 - 0.055;
+        vec3 lo = c * 12.92;
+        return mix(hi, lo, vec3(cutoff));
+    }
+    void main() {
+        gl_FragColor = vec4(linearToSRGB(uColor), 1.0);
+    }
+`;
+function edgeBandMaterial(color) {
+    return new THREE.ShaderMaterial({
+        vertexShader:   EDGE_BAND_VERTEX_SHADER,
+        fragmentShader: EDGE_BAND_FRAGMENT_SHADER,
+        side: THREE.DoubleSide,
+        uniforms: {
+            uR:     GLOBAL_R_UNIFORM,
+            uL:     GLOBAL_L_UNIFORM,
+            uColor: { value: new THREE.Color(color) }
+        }
+    });
+}
+
 function makeEdgeBand(sign) {
     const geo = buildEdgeBandGeometry(sign);
-    const uniforms = createEntityUniforms();
     const color = (sign > 0) ? 0xea1818 : 0x1830ea;
-    const mat = embeddingMaterial(color, uniforms);
-    return new THREE.Mesh(geo, mat);
+    return new THREE.Mesh(geo, edgeBandMaterial(color));
 }
 
 // ===== Ground patch (intrinsic view) =====
@@ -1896,57 +1946,36 @@ function updateEntities(dt) {
         // Extrinsic: deck-transform the entity into the canonical [0, L)
         // u-range so it sits on the single-cover ribbon mesh.
         //
-        // Mapping the ANCHOR alone is not enough — the embedding shader
-        // re-applies the (mesh-local x, y, z) offsets in the canonical
-        // chart, and the deck transform is orientation-reversing, so the
-        // mesh's local axes have to be reflected to match. Apply
-        // scale.set(-1, -1, 1) on odd laps; combined with mode-dependent
-        // uObjH (below), this keeps the mesh continuous through wraps in
-        // BOTH modes.
+        // The deck transform is orientation-reversing, so applying it on
+        // the anchor alone (par·v, par·β, par·h) isn't enough — the mesh's
+        // local x AND y axes have to be reflected too, otherwise the body
+        // diverges from the anchor across the wrap. scale.set(-1, -1, 1)
+        // on odd laps does that. With this scale + mode-dependent uObjH:
         //
-        // Mode-dependent uObjH:
-        //   Mode A (HEIGHT_TWIST = false): uObjH = 0. Entity sits ON the
-        //     strip surface — the (u+L, -v, h) identification doesn't flip
-        //     h but the embedding's normal does, so any h·normal offset
-        //     would snap at the wrap. Instead height is communicated by a
-        //     teal→amber→red color tint on the mesh material plus a
-        //     shadow ring on the surface beneath the entity.
-        //   Mode B (HEIGHT_TWIST = true): uObjH = par·h. The (-h)·(-n)=h·n
-        //     cancellation makes the spatial offset continuous through the
-        //     wrap — no color encoding needed.
+        //   Mode B (HEIGHT_TWIST=true):  uObjH = par·h. (-h)·(-n) = h·n
+        //     makes the embedded position continuous through the wrap for
+        //     ALL h. Smooth jumps across the seam.
+        //
+        //   Mode A (HEIGHT_TWIST=false): uObjH = h. The mesh BODY is
+        //     continuous at the seam when h=0 (grounded entities walking
+        //     across the wrap don't snap). For h≠0 there's an unavoidable
+        //     anchor snap of 2h — Mode A's identification doesn't flip h
+        //     but the embedding normal does, and that's a real topological
+        //     obstruction. The snap only manifests for entities at h>0
+        //     CROSSING the seam (jumping players). Static elevated entities
+        //     (smiley at h=180, platforms) live entirely in [0, L) and
+        //     never trigger it.
         const u = e.entityUniforms;
         const lapCount = Math.floor(eu / L);
         const par = (((lapCount % 2) + 2) % 2) === 0 ? 1 : -1;
-        const extU = eu - lapCount * L;
-        const extV = par * ev;
-        u.uObjU.value    = extU;
-        u.uObjV.value    = extV;
+        u.uObjU.value    = eu - lapCount * L;
+        u.uObjV.value    = par * ev;
         u.uObjBeta.value = par * eb;
-        u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : 0;
+        u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
+        u.uTintAmount.value = 0;
         if (par < 0) e.extrinsicMesh.scale.set(-1, -1, 1);
         else         e.extrinsicMesh.scale.set( 1,  1, 1);
-
-        // Height encoding for Mode A: tint mesh + shadow ring.
-        if (!HEIGHT_TWIST && eh > 0.5) {
-            const t = Math.min(Math.max(eh / MAX_H_FOR_TINT, 0), 1);
-            const tintColor = computeHeightTint(t);
-            u.uTintAmount.value = t;
-            u.uTintColor.value.copy(tintColor);
-
-            // Shadow ring on the canonical surface. Position via embedding;
-            // orient so its +Y aligns with the surface normal at (extU, extV).
-            embedSurfacePosAndNormal(extU, extV, _ringPos, _ringNormal);
-            e._shadowRing.position.copy(_ringPos);
-            e._shadowRing.quaternion.setFromUnitVectors(_ringYAxis, _ringNormal);
-            const radius = 8 + eh * 0.18;
-            e._shadowRing.scale.set(radius, 1, radius);
-            e._shadowRing.material.color.copy(tintColor);
-            e._shadowRing.material.opacity = 0.18 + 0.45 * t;
-            e._shadowRing.visible = true;
-        } else {
-            u.uTintAmount.value = 0;
-            e._shadowRing.visible = false;
-        }
+        e._shadowRing.visible = false;
     }
 }
 
