@@ -596,7 +596,9 @@ const EXTRINSIC_EMBED_VERTEX_SHADER = `
 
 const EXTRINSIC_EMBED_FRAGMENT_SHADER = `
     precision highp float;
-    uniform vec3 uColor;
+    uniform vec3  uColor;
+    uniform vec3  uTintColor;
+    uniform float uTintAmount;     // 0 = no tint (Mode B), 0..1 in Mode A
     // Manual sRGB conversion so colors match the intrinsic side (which uses
     // a stock MeshBasicMaterial with vertex colors that auto-converts).
     vec3 linearToSRGB(vec3 c) {
@@ -606,17 +608,25 @@ const EXTRINSIC_EMBED_FRAGMENT_SHADER = `
         return mix(hi, lo, vec3(cutoff));
     }
     void main() {
-        gl_FragColor = vec4(linearToSRGB(uColor), 1.0);
+        vec3 c = mix(uColor, uTintColor, clamp(uTintAmount, 0.0, 1.0));
+        gl_FragColor = vec4(linearToSRGB(c), 1.0);
     }
 `;
 
 // Per-entity uniforms (one per entity, shared by all of its child materials).
+// uTintAmount + uTintColor encode height-as-color in Mode A — entities sit
+// directly on the strip surface (uObjH=0) and h is communicated visually
+// via a teal→amber→red ramp instead of a normal-direction offset, since
+// Mode A's identification doesn't flip h and the embedding's surface
+// normal does, so any h·normal offset would snap at the wrap boundary.
 function createEntityUniforms() {
     return {
-        uObjU:    { value: 0 },
-        uObjV:    { value: 0 },
-        uObjBeta: { value: 0 },
-        uObjH:    { value: 0 }
+        uObjU:       { value: 0 },
+        uObjV:       { value: 0 },
+        uObjBeta:    { value: 0 },
+        uObjH:       { value: 0 },
+        uTintAmount: { value: 0 },
+        uTintColor:  { value: new THREE.Color(0xffffff) }
     };
 }
 
@@ -634,13 +644,15 @@ function embeddingMaterial(color, entityUniforms) {
         fragmentShader: EXTRINSIC_EMBED_FRAGMENT_SHADER,
         side: THREE.DoubleSide,
         uniforms: {
-            uObjU:    entityUniforms.uObjU,
-            uObjV:    entityUniforms.uObjV,
-            uObjBeta: entityUniforms.uObjBeta,
-            uObjH:    entityUniforms.uObjH,
-            uR:       GLOBAL_R_UNIFORM,
-            uL:       GLOBAL_L_UNIFORM,
-            uColor:   { value: new THREE.Color(color) }
+            uObjU:       entityUniforms.uObjU,
+            uObjV:       entityUniforms.uObjV,
+            uObjBeta:    entityUniforms.uObjBeta,
+            uObjH:       entityUniforms.uObjH,
+            uR:          GLOBAL_R_UNIFORM,
+            uL:          GLOBAL_L_UNIFORM,
+            uColor:      { value: new THREE.Color(color) },
+            uTintAmount: entityUniforms.uTintAmount,
+            uTintColor:  entityUniforms.uTintColor
         }
     });
 }
@@ -1702,6 +1714,25 @@ function fitCloneCount(e, target) {
     }
 }
 
+// Shadow ring: a flat disc that sits on the strip surface beneath an
+// elevated entity in Mode A. Radius scales with the entity's h; color
+// matches the height tint. Communicates "this entity is up high" without
+// any spatial offset (which would snap at the wrap boundary).
+function makeShadowRing() {
+    const geo = new THREE.CircleGeometry(1, 24);
+    geo.rotateX(-Math.PI / 2);   // disc lies in XZ plane, +Y is the disc normal
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide,
+        depthWrite: false        // don't occlude the entity standing on it
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.visible = false;
+    return mesh;
+}
+
 function addEntity(e) {
     entities.push(e);
     if (e.kind === 'walker') walkers.push(e);
@@ -1709,6 +1740,8 @@ function addEntity(e) {
     intrinsicView.scene.add(e.intrinsicMesh);
     fitCloneCount(e, maxPreimagesForR(R));
     extrinsicView.scene.add(e.extrinsicMesh);
+    e._shadowRing = makeShadowRing();
+    extrinsicView.scene.add(e._shadowRing);
 }
 
 // Player. Lives at strip-coords (world.u, world.v, world.beta, world.h).
@@ -1746,6 +1779,44 @@ addEntity(makeSmiley(220, +5, 180, 12));
 
 // Scratch.
 const _entityPos = new THREE.Vector3();
+const _ringPos = new THREE.Vector3();
+const _ringNormal = new THREE.Vector3();
+const _ringYAxis = new THREE.Vector3(0, 1, 0);
+
+// Height tint ramp for Mode A. Teal at h=0 → amber at MAX_H/2 → red at MAX_H.
+// Distinct from the strip's blue→red v-gradient (teal is greenish, strip blue
+// is pure blue — won't be confused).
+const MAX_H_FOR_TINT = 250;
+const _heightTeal  = new THREE.Color(0x1d9e75);
+const _heightAmber = new THREE.Color(0xef9f27);
+const _heightRed   = new THREE.Color(0xe24b4a);
+const _heightTmp   = new THREE.Color();
+function computeHeightTint(t) {
+    if (t < 0.5) return _heightTmp.copy(_heightTeal).lerp(_heightAmber, t * 2);
+    return _heightTmp.copy(_heightAmber).lerp(_heightRed, (t - 0.5) * 2);
+}
+
+// Surface position + normal at canonical (u, v). Same math as the embedding
+// vertex shader, used JS-side for shadow ring placement.
+function embedSurfacePosAndNormal(u, v, posOut, normalOut) {
+    const angle = u * 2 * Math.PI / L;
+    const halfA = angle * 0.5;
+    const cosU = Math.cos(angle), sinU = Math.sin(angle);
+    const cosH = Math.cos(halfA), sinH = Math.sin(halfA);
+    const rEff = R + v * cosH;
+    posOut.set(rEff * cosU, v * sinH, rEff * sinU);
+    const ddux = -rEff * sinU - 0.5 * v * sinH * cosU;
+    const dduy =  0.5 * v * cosH;
+    const dduz =  rEff * cosU - 0.5 * v * sinH * sinU;
+    const ddvx = cosH * cosU;
+    const ddvy = sinH;
+    const ddvz = cosH * sinU;
+    const nx = dduy * ddvz - dduz * ddvy;
+    const ny = dduz * ddvx - ddux * ddvz;
+    const nz = ddux * ddvy - dduy * ddvx;
+    const nLen = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    normalOut.set(nx / nLen, ny / nLen, nz / nLen);
+}
 
 function updateEntities(dt) {
     // Walkers walk along +u in cover. u is cumulative; wrap by 2L for float
@@ -1828,30 +1899,53 @@ function updateEntities(dt) {
         // Mapping the ANCHOR alone is not enough — the embedding shader
         // re-applies the (mesh-local x, y, z) offsets in the canonical
         // chart, and the deck transform is orientation-reversing, so the
-        // mesh's local axes have to be reflected to match. Concretely:
-        // for a mesh vertex at xLocal=+1, the cover-deck-image's u-offset
-        // is +sin(β), but with anchor-only mapping (ext_β = -β) the shader
-        // computes -sin(β) — off by 2·sin(β). Same story on yLocal in
-        // Mode B (since the deck flips h there too). Solution:
-        //   scale.set(-1, +1, 1) for Mode A on odd laps (mirror x only)
-        //   scale.set(-1, -1, 1) for Mode B on odd laps (mirror x AND y)
-        // With the scale on the Group, modelMatrix·position negates the
-        // appropriate components and the ext_hit* values come out matching
-        // the cover-deck-image. In Mode B that yields a continuous embedded
-        // mesh through the wrap; Mode A keeps its h-direction snap (which
-        // the user accepts) but at least gets asymmetric features on the
-        // correct side of the canonical chart.
+        // mesh's local axes have to be reflected to match. Apply
+        // scale.set(-1, -1, 1) on odd laps; combined with mode-dependent
+        // uObjH (below), this keeps the mesh continuous through wraps in
+        // BOTH modes.
+        //
+        // Mode-dependent uObjH:
+        //   Mode A (HEIGHT_TWIST = false): uObjH = 0. Entity sits ON the
+        //     strip surface — the (u+L, -v, h) identification doesn't flip
+        //     h but the embedding's normal does, so any h·normal offset
+        //     would snap at the wrap. Instead height is communicated by a
+        //     teal→amber→red color tint on the mesh material plus a
+        //     shadow ring on the surface beneath the entity.
+        //   Mode B (HEIGHT_TWIST = true): uObjH = par·h. The (-h)·(-n)=h·n
+        //     cancellation makes the spatial offset continuous through the
+        //     wrap — no color encoding needed.
         const u = e.entityUniforms;
         const lapCount = Math.floor(eu / L);
         const par = (((lapCount % 2) + 2) % 2) === 0 ? 1 : -1;
-        u.uObjU.value    = eu - lapCount * L;
-        u.uObjV.value    = par * ev;
+        const extU = eu - lapCount * L;
+        const extV = par * ev;
+        u.uObjU.value    = extU;
+        u.uObjV.value    = extV;
         u.uObjBeta.value = par * eb;
-        u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
-        if (par < 0) {
-            e.extrinsicMesh.scale.set(-1, HEIGHT_TWIST ? -1 : 1, 1);
+        u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : 0;
+        if (par < 0) e.extrinsicMesh.scale.set(-1, -1, 1);
+        else         e.extrinsicMesh.scale.set( 1,  1, 1);
+
+        // Height encoding for Mode A: tint mesh + shadow ring.
+        if (!HEIGHT_TWIST && eh > 0.5) {
+            const t = Math.min(Math.max(eh / MAX_H_FOR_TINT, 0), 1);
+            const tintColor = computeHeightTint(t);
+            u.uTintAmount.value = t;
+            u.uTintColor.value.copy(tintColor);
+
+            // Shadow ring on the canonical surface. Position via embedding;
+            // orient so its +Y aligns with the surface normal at (extU, extV).
+            embedSurfacePosAndNormal(extU, extV, _ringPos, _ringNormal);
+            e._shadowRing.position.copy(_ringPos);
+            e._shadowRing.quaternion.setFromUnitVectors(_ringYAxis, _ringNormal);
+            const radius = 8 + eh * 0.18;
+            e._shadowRing.scale.set(radius, 1, radius);
+            e._shadowRing.material.color.copy(tintColor);
+            e._shadowRing.material.opacity = 0.18 + 0.45 * t;
+            e._shadowRing.visible = true;
         } else {
-            e.extrinsicMesh.scale.set(1, 1, 1);
+            u.uTintAmount.value = 0;
+            e._shadowRing.visible = false;
         }
     }
 }
