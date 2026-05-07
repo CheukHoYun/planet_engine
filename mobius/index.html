@@ -1972,19 +1972,29 @@ function updateEntities(dt) {
         u.uObjV.value    = par * ev;
         u.uObjBeta.value = par * eb;
         u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
-        u.uTintAmount.value = 0;
-        // Scale on odd lap is mode-dependent:
-        //   Mode A: (-1, +1, 1) — X mirror only. Mesh body extends along
-        //     the canonical normal, which is opposite of cover-up after
-        //     the deck transform — this IS the snap (the topological
-        //     obstruction Mode A keeps visible). Jumping at h>0 on odd
-        //     lap pushes the mesh further along that flipped direction;
-        //     this is intrinsic to the trivial bundle, not a bug.
-        //   Mode B: (-1, -1, 1) — X AND Y mirror. Combined with par·h on
-        //     uObjH, the (-h)·(-n) = h·n cancellation makes jumping and
-        //     walking continuous through the seam.
-        if (par < 0) e.extrinsicMesh.scale.set(-1, HEIGHT_TWIST ? -1 : 1, 1);
-        else         e.extrinsicMesh.scale.set( 1, 1, 1);
+        // Both modes get scale(-1, -1, 1) on odd lap. With Mode B's par·h
+        // on uObjH the position is continuous through the seam via the
+        // (-h)·(-n)=h·n cancellation. With Mode A's plain h, the X+Y
+        // mirror makes the body travel continuously to the other face
+        // (no snap) — and the visible signature of "I'm on the other
+        // sheet of the cover" is communicated by a colorless tint on
+        // dynamic entities (player, walkers) on the odd lap. Static
+        // entities (smiley, tree, pole, platforms, signpost) live in
+        // [0, L) by construction and are always rendered colored.
+        if (par < 0) e.extrinsicMesh.scale.set(-1, -1, 1);
+        else         e.extrinsicMesh.scale.set( 1,  1, 1);
+
+        // Mode A's "other realm" colorless tint. Only applied to dynamic
+        // entities (player, walkers) when their cover-u places them on
+        // the odd lap. Mode B's deck transform keeps everything coherent
+        // in 3D, so no tint is needed there.
+        const isDynamic = (e.kind === 'player' || e.kind === 'walker');
+        if (!HEIGHT_TWIST && isDynamic && par < 0) {
+            u.uTintAmount.value = 0.85;
+            u.uTintColor.value.setHex(0x808080);
+        } else {
+            u.uTintAmount.value = 0;
+        }
         e._shadowRing.visible = false;
     }
 }
