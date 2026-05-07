@@ -1971,7 +1971,11 @@ function updateEntities(dt) {
         u.uObjU.value    = eu - lapCount * L;
         u.uObjV.value    = par * ev;
         u.uObjBeta.value = par * eb;
-        u.uObjH.value    = HEIGHT_TWIST ? (par * eh) : eh;
+        // Both modes use par·h. With the twisted ribbon embedding, this is
+        // what makes the body continuous through the seam ((-h)·(-n)=h·n).
+        // Mode A and Mode B are now mathematically identical here; the only
+        // difference is the colorless tint applied below in Mode A.
+        u.uObjH.value    = par * eh;
         // Both modes get scale(-1, -1, 1) on odd lap. With Mode B's par·h
         // on uObjH the position is continuous through the seam via the
         // (-h)·(-n)=h·n cancellation. With Mode A's plain h, the X+Y
