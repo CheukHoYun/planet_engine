@@ -204,7 +204,6 @@
             <div class="key-row"><span class="keys">A&nbsp;D</span><span>walk</span></div>
             <div class="key-row"><span class="keys">W / Space</span><span>jump</span></div>
             <div class="key-row"><span class="keys">Wheel</span><span>FOV</span></div>
-            <div class="key-row"><span class="keys">T</span><span>state snapshot</span></div>
         </div>
     </div>
     <div class="panel">
@@ -970,12 +969,25 @@ window.addEventListener('keydown', (ev) => {
         player.vh = JUMP_VEL;
     }
     if (k === 't' && !ev.repeat) {
-        toggleSnapshot();
+        // Hidden feature: hold T for 1 second to open the snapshot panel.
+        // Tapping T while open dismisses it; tapping while closed does nothing.
+        tHoldTimer = setTimeout(() => {
+            tHoldTimer = null;
+            if (snapshotEl.style.display === 'none') toggleSnapshot();
+        }, 1000);
         ev.preventDefault();
     }
 });
+let tHoldTimer = null;
 window.addEventListener('keyup', (ev) => {
     keys[ev.key.toLowerCase()] = false;
+    if (ev.key.toLowerCase() === 't') {
+        if (tHoldTimer !== null) {
+            clearTimeout(tHoldTimer);
+            tHoldTimer = null;
+            if (snapshotEl.style.display !== 'none') toggleSnapshot();
+        }
+    }
 });
 
 function applyPlayerInput() {

@@ -237,7 +237,6 @@
             <div class="key-row"><span class="keys">Space</span><span>jump</span></div>
             <div class="key-row"><span class="keys">Mouse</span><span>aim camera</span></div>
             <div class="key-row"><span class="keys">Wheel</span><span>zoom</span></div>
-            <div class="key-row"><span class="keys">T</span><span>state snapshot</span></div>
         </div>
     </div>
     <div class="panel">
@@ -253,13 +252,13 @@
             <div class="heading">World</div>
             <div class="row">
                 <span class="label">Radius</span>
-                <input id="rSlider" type="range" min="100" max="2000" value="660" class="slider" disabled>
-                <span class="value" id="rValue">660</span>
+                <input id="rSlider" type="range" min="100" max="2000" value="712" class="slider" disabled>
+                <span class="value" id="rValue">712</span>
             </div>
             <div class="row">
                 <span class="label">View dist.</span>
-                <input id="farSlider" type="range" min="200" max="15000" value="4150" step="50" class="slider" disabled>
-                <span class="value" id="farValue">4150</span>
+                <input id="farSlider" type="range" min="200" max="15000" value="3500" step="50" class="slider" disabled>
+                <span class="value" id="farValue">3500</span>
             </div>
             <div class="row buttons">
                 <button id="farHalfBtn" title="View distance = πR (the antipode)">½ lap</button>
@@ -308,14 +307,14 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ===== Constants =====
-let   R = 660.0;                     // mutable: the R slider rebinds it live
-const R_INITIAL = 660.0;             // the radius the extrinsic sphere geometry was built with
+let   R = 712.0;                     // mutable: the R slider rebinds it live
+const R_INITIAL = 712.0;             // the radius the extrinsic sphere geometry was built with
 const EYE_HEIGHT = 1.7;
 const WALK_SPEED = 100.0;            // m/s — a brisk run
 const TURN_SPEED = 2.6;              // rad/s — A/D
 const GRAVITY = 250.0;               // m/s²
 const JUMP_VEL = 145.0;              // m/s
-let   ORBIT_RADIUS = 212.99;         // third-person camera distance from player (mouse wheel)
+let   ORBIT_RADIUS = 188.45;         // third-person camera distance from player (mouse wheel)
 const ORBIT_MIN = 20;
 const ORBIT_MAX = 400;
 const PLAYER_CENTER_Y = 15;          // half of player mesh height (PLAYER_H / 2)
@@ -331,7 +330,7 @@ const GRID_N = 21;
 const GRID_HALF_ARC = 15000.0;
 // Default far plane. Drag the View slider up (or click the lap buttons)
 // if you want long-range wraps.
-const DEFAULT_FAR   = 4150.0;
+const DEFAULT_FAR   = 3500.0;
 const PLAYER_COLOR = 0xff5e8a;
 
 // ===== Frame: SO(3) state as a Matrix4, columns [right | forward | up] =====
@@ -376,19 +375,19 @@ class Frame {
 //   grounded:     standing on ground or platform
 const world = {
     frame: new Frame(),
-    pitch: 0.323,
-    cameraAzim: Math.PI,
+    pitch: 0.348,
+    cameraAzim: -3.1596,
     h: 0,
     vh: 0,
     grounded: true
 };
-// Spawn the player at (θ, φ) ≈ (89.77°, -2.23°) on the sphere — a chosen
+// Spawn the player at (θ, φ) ≈ (89.62°, -2.59°) on the sphere — a chosen
 // vantage point baked from a captured snapshot so the world opens at a
 // scenic view rather than at the north pole.
 setFrameFromUpForward(
     world.frame,
-    new THREE.Vector3(0.004, -0.039, 0.999),
-    new THREE.Vector3(0.440, -0.897, -0.037)
+    new THREE.Vector3(0.007, -0.045, 0.999),
+    new THREE.Vector3(0.407, -0.912, -0.044)
 );
 
 // The intrinsic view is a tangent plane centered NOT on the player but on
@@ -1140,10 +1139,10 @@ function makeExtrinsicView(canvas) {
     // Orbit state. `target` is the lookAt point — origin by default; middle-
     // click pans it sideways/up so you can frame the view off-center.
     const orbit = {
-        azimuth: -0.39,
-        elevation: -1.0433,
-        radius: 3438.98,
-        target: new THREE.Vector3(6.269, 562.293, 255.760),
+        azimuth: -0.5533,
+        elevation: -0.8000,
+        radius: 2085.13,
+        target: new THREE.Vector3(-60.725, -115.273, 273.795),
         mode: null,        // 'orbit' | 'pan' | null
         lastX: 0,
         lastY: 0
@@ -1962,16 +1961,32 @@ window.addEventListener('keydown', (e) => {
         }
         e.preventDefault();
     }
-    if (k === 't') {
-        toggleSnapshot();
+    if (k === 't' && !e.repeat) {
+        // Hidden feature: hold T for 1 second to open the snapshot panel.
+        // Tapping T while the panel is open dismisses it; tapping T while
+        // closed does nothing.
+        tHoldTimer = setTimeout(() => {
+            tHoldTimer = null;
+            if (snapshotEl.style.display === 'none') toggleSnapshot();
+        }, 1000);
         e.preventDefault();
     }
 });
+let tHoldTimer = null;
 window.addEventListener('keyup', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
         keys[k] = false;
         e.preventDefault();
+    }
+    if (k === 't') {
+        // Released before 1 s: it was a tap. Cancel the open and, if the
+        // panel is currently open, dismiss it.
+        if (tHoldTimer !== null) {
+            clearTimeout(tHoldTimer);
+            tHoldTimer = null;
+            if (snapshotEl.style.display !== 'none') toggleSnapshot();
+        }
     }
 });
 
