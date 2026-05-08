@@ -1824,7 +1824,8 @@ const PITCH_MIN = -0.18;
 const PITCH_MAX = 1.45;
 
 intrinsicCanvas.addEventListener('click', () => {
-    if (!pointerLocked) intrinsicCanvas.requestPointerLock();
+    if (pointerLocked) document.exitPointerLock();
+    else               intrinsicCanvas.requestPointerLock();
 });
 document.addEventListener('pointerlockchange', () => {
     pointerLocked = document.pointerLockElement === intrinsicCanvas;
