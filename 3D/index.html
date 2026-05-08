@@ -241,6 +241,7 @@
             <div class="key-row"><span class="keys">Space</span><span>jump</span></div>
             <div class="key-row"><span class="keys">Mouse</span><span>aim camera</span></div>
             <div class="key-row"><span class="keys">Wheel</span><span>zoom</span></div>
+            <div class="key-row" id="hintRelease" style="display: none;"><span class="keys">Click</span><span>release mouse</span></div>
         </div>
     </div>
     <div class="panel">
@@ -1829,6 +1830,8 @@ intrinsicCanvas.addEventListener('click', () => {
 });
 document.addEventListener('pointerlockchange', () => {
     pointerLocked = document.pointerLockElement === intrinsicCanvas;
+    const hint = document.getElementById('hintRelease');
+    if (hint) hint.style.display = pointerLocked ? '' : 'none';
 });
 document.addEventListener('mousemove', (e) => {
     if (!pointerLocked) return;
